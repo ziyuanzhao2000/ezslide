@@ -6,6 +6,7 @@ import re
 from math import log
 from PIL import Image
 from .global_chunk_cache import make_cache_store
+from .lazy_pyramid import lazy_pyramid
 
 
 tag_registries = [tifffile.TIFF.TAGS,
@@ -89,6 +90,16 @@ def infer_axes(array, axes=None):
     elif num_axes > 2:
         return '?' * (num_axes - 2) + 'YX'
     return axes
+
+
+def pyramid_factors(axes, factor=2):
+    """Per-axis reduction for a TIFF axes string: ``factor`` on Y and X, 1 elsewhere.
+
+    ``lazy_pyramid``'s default ``(1, 1, 2, 2)`` assumes a trailing-YX layout,
+    which is wrong for the orders tifffile actually reports for slides
+    (``YXS`` for interleaved RGB, ``SYX`` for planar). Derive it instead.
+    """
+    return tuple(int(factor) if a in 'YX' else 1 for a in axes)
 
 
 def array_repr_html(array):
@@ -254,14 +265,115 @@ class TiffLevel():
             parser = lambda x: x
         self._parsed_metadata = parser(metadata)
 
+class LazyTiffLevel(TiffLevel):
+    """A pyramid level that is not in the file — computed from the level above.
+
+    Same surface as ``TiffLevel`` (the readers, the writer and ``iter_tiles``
+    cannot tell the difference), but ``data`` is a ``LazyLevel``/``CachedLevel``
+    view rather than a zarr store over TIFF tiles, and there are no ``pages``
+    because there is no IFD behind it.
+
+    Attributes that describe the *data* (``shape``, ``dtype``, ``ndim``) are set
+    here; everything else (``axes``, ``kind``, ``name``, ...) falls through to
+    the base level, since a downsample changes extent but not layout.
+    """
+
+    def __init__(self, parent, array, level_id):
+        self._parent = parent
+        self.level_id = level_id
+        self.data = array
+        self.shape = tuple(array.shape)
+        self.dtype = np.dtype(array.dtype)
+        self.ndim = len(self.shape)
+        self._pages = []
+        self._store = None
+        self._delayed = None
+
+        self.downsample = parent.shape[parent.y_ax] / self.shape[parent.y_ax]
+        self._metadata = dict(parent._metadata)
+        self._metadata['ImageWidth'] = self.shape[parent.x_ax]
+        self._metadata['ImageLength'] = self.shape[parent.y_ax]
+        self._parsed_metadata = {}
+
+    def __getattr__(self, name):
+        parent = self.__dict__.get('_parent')
+        if parent is None:                    # during __init__ / unpickling
+            raise AttributeError(name)
+        return getattr(parent, name)
+
+    @property
+    def delayed_data(self):
+        """Dask view, built on first use — only ``__repr__`` needs it."""
+        if self._delayed is None:
+            self._delayed = da.from_array(
+                self.data, chunks=self.data.chunks,
+                name=f"lazy-level-{self.level_id}-{id(self):x}",
+                meta=np.empty((0,) * self.ndim, self.dtype))
+        return self._delayed
+
+    def parse_metadata(self, kind):
+        """Inherit the base level's parsed metadata, with spacing rescaled.
+
+        The tags come from level 0's IFD, so the physical pixel size recorded
+        there describes level 0. This level's pixels are ``downsample`` times
+        larger.
+        """
+        parsed = dict(self._parent._parsed_metadata)
+        for key in ('PhysicalSizeX', 'PhysicalSizeY'):
+            if parsed.get(key) is not None:
+                parsed[key] = parsed[key] * self.downsample
+        self._parsed_metadata = parsed
+
+
 class TiffSeries():
-    def __init__(self, tiffseries):
+    def __init__(self, tiffseries, pyramidalize=False, pyramid=None):
         self._series = tiffseries
         self._levels = [TiffLevel(level, level_id) \
                         for level_id, level in enumerate(tiffseries.levels)]
-    
+        self._pyramidalized = False
+        if pyramidalize and not tiffseries.is_pyramidal:
+            self.pyramidalize(**(pyramid or {}))
+
+    def pyramidalize(self, levels=8, factor=2, how='mean', cache='tmp',
+                     store=None, materialize_below=None, min_extent=256,
+                     **kwargs):
+        """Append lazy downsampled levels on top of level 0.
+
+        Nothing is read here: the returned levels know their shapes and compute
+        pixels only when indexed. See ``lazy_pyramid`` for the cost model.
+
+        Parameters
+        ----------
+        levels, factor, how, min_extent
+            Pyramid depth, per-step XY reduction, reduction kernel (use
+            ``'mode'`` for label images), and the extent at which to stop.
+        cache, store, materialize_below
+            Forwarded to ``lazy_pyramid``. ``cache='tmp'`` keeps computed
+            blocks on disk rather than in RAM — level 1 alone is ~25% of the
+            slide, which is why ``'memory'`` is a poor default here.
+            ``materialize_below`` is ``None`` so that opening a file stays
+            instant; set it to 3 or so if you will pan around the deep levels,
+            accepting that construction then reads the whole slide once.
+        """
+        base = self._levels[0]
+        axes = infer_axes(base.data, getattr(base, 'axes', None))
+        stack = lazy_pyramid(base.data, levels=levels,
+                             factors=pyramid_factors(axes, factor), how=how,
+                             cache=cache, store=store,
+                             materialize_below=materialize_below,
+                             min_extent=min_extent, **kwargs)
+        self._levels.extend(LazyTiffLevel(base, arr, level_id)
+                            for level_id, arr in enumerate(stack[1:], 1))
+        self._pyramidalized = len(stack) > 1
+        return self._levels
+
     def __getattr__(self, name):
         return getattr(self._series, name)
+
+    @property
+    def is_pyramidal(self):
+        """True once lazy levels exist, even though the file has only one."""
+        return self._series.is_pyramidal or self._pyramidalized
 
     @property
     def metadata(self):
@@ -337,11 +449,26 @@ class TiffSeries():
 
 
 class TiffFile():
-    def __init__(self, file, kind=None, *args, **kwargs):
+    def __init__(self, file, kind=None, *args, pyramidalize=False,
+                 pyramid=None, **kwargs):
+        """
+        Parameters
+        ----------
+        pyramidalize : bool
+            Give every series that is not already pyramidal a lazy pyramid, so
+            that flat TIFFs expose the same multi-level interface as an SVS.
+            Series that are pyramidal in the file are left alone. Costs nothing
+            at open time — levels compute on demand.
+        pyramid : dict, optional
+            Options for ``TiffSeries.pyramidalize``, e.g.
+            ``{'how': 'mode', 'materialize_below': 3}``.
+        """
         self._file = file
         self._tifffile = tifffile.TiffFile(file, *args, **kwargs)
         self._zarr_store = tifffile.imread(file, *args, **kwargs, aszarr=True)
-        self._series = [TiffSeries(series) for series in self._tifffile.series]
+        self._series = [TiffSeries(series, pyramidalize=pyramidalize,
+                                   pyramid=pyramid)
+                        for series in self._tifffile.series]
         self._kind = kind if kind else self.series[0].kind 
 
         try:
