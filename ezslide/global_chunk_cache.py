@@ -7,7 +7,7 @@ from zarr.storage import MemoryStore
 
 # Global chunk cache: one memory pool shared by every zarr store this module
 # opens, with a single LRU order across all of them.
-CACHE_MAX_BYTES = 1 * 1024 * 1024 * 1024  # 1 GB
+CACHE_MAX_BYTES = 10 * 1024 * 1024 * 1024  # 1 GB
 
 
 class GlobalChunkCache:

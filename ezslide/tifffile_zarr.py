@@ -176,8 +176,10 @@ class TiffLevel():
         initial_array = zarr.open(cached_store)
         if isinstance(initial_array, zarr.Group): # this occurs at level 0
             initial_array = initial_array['0']
+            self.delayed_data = da.from_zarr(cached_store, component='0')
+        else:
+            self.delayed_data = da.from_zarr(cached_store)
         self.data = initial_array
-        self.delayed_data = da.from_zarr(cached_store)
         self._store = cached_store
         self._metadata = dict([
             (get_tag_name(tag.code), tag.value) for tag in self._level.pages[0].tags
@@ -296,7 +298,12 @@ class TiffSeries():
             elif self.axes[1:] == 'YX' and img.shape[0] == 3:
                 return Image.fromarray(img.transpose(1,2,0)) # RGB
 
-
+    @property
+    def data(self):
+        if len(self._levels) == 1:
+            return self._levels[0].data
+        else:
+            return [level.data for level in self._levels]
     def __repr__(self):
         lines = [
                 f'Image {self.name!r}' if self.name else 'Image' + f'of type {self.kind}',
@@ -351,6 +358,13 @@ class TiffFile():
     def kind(self):
         return self._kind 
 
+    @property
+    def data(self):
+        if len(self._series) == 1:
+            return self._series[0].data
+        else:
+            return [series.data for series in self._series]
+        
     def __getattr__(self, name):
         return getattr(self._tifffile, name)
 

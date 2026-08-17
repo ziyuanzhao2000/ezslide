@@ -1,16 +1,32 @@
 [project]
 name = "ezslide"
-version = "0.1.0"
-description = "Add your description here"
+version = "0.1.2"
+description = "Wrapper around tifffile to interface with wsidata for easy accessing microscopy image data."
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = [
-    "imagecodecs>=2026.8.16",
-    "ipykernel>=7.3.0",
-    "lazyslide>=0.12.0",
-    "tifffile>=2026.7.31",
+license = "MIT"
+
+authors = [{ name = "Ziyuan Zhao", email = "zhaoziyuan2000@gmail.com" }]
+classifiers = [
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
 ]
+dependencies = [
+    "dask>=2026.5",
+    "imagecodecs>=2026.5",
+    "tifffile>=2026.5.2", # loosened from 2026.7.31
+    "wsidata>=0.11.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/ziyuanzhao2000/ezslide"
+Issues = "https://github.com/ziyuanzhao2000/ezslide/issues"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.3.0",
+]
