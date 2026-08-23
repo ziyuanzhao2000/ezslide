@@ -24,14 +24,14 @@ synthesizes zarr metadata and decodes TIFF tiles through imagecodecs on
 demand, and there is no way to hand a Python store to a tensorstore driver.
 For those, ``as_tensorstore`` builds a ``ts.virtual_chunked`` instead — a real
 TensorStore whose chunks are filled by calling back into the zarr array, and
-therefore through ``global_chunk_cache``. The bytes travel the same path they
+therefore through ``array.cache``. The bytes travel the same path they
 did before; what is new is that indexing is lazy and the result is a
 tensorstore, uniformly, whatever the array turned out to be backed by.
 
 Eager mode
 ----------
 Plenty of callers want pixels rather than views — ``PIL.Image.fromarray``,
-the reduction kernel in ``zarr_pyramid.block_reduce``, ``tifffile``'s writer.
+the reduction kernel in ``array.reduce.block_reduce``, ``tifffile``'s writer.
 ``TensorStoreArray.eagerfy()`` flips one flag so that from then on ``arr[sel]``
 returns ``np.array(arr[sel])``, i.e. exactly what zarr used to return, without
 the caller needing to know which kind of array it is holding.
@@ -53,7 +53,7 @@ __all__ = ["TensorStoreArray", "as_tensorstore", "tensorstore_context"]
 
 
 #: Budget for tensorstore's own chunk cache, shared by every view this module
-#: opens. It sits one level above ``global_chunk_cache.CACHE``: that pool holds
+#: opens. It sits one level above ``array.cache.CACHE``: that pool holds
 #: encoded chunk bytes keyed by store key, this one holds decoded chunks keyed
 #: by position, so a repeat read of a region skips both the decode and the trip
 #: back into Python. Worth having — without it every read re-enters the zarr
@@ -168,7 +168,7 @@ class TensorStoreArray:
     Duck-types the parts of a zarr array the rest of this package uses —
     ``shape``, ``dtype``, ``ndim``, ``size``, ``nbytes``, ``chunks``,
     ``__getitem__``, ``__setitem__``, ``__array__`` — so it drops into
-    ``iter_tiles``, ``lazy_pyramid``, ``zarr_pyramid`` and napari-style
+    ``iter_tiles``, ``array.pyramid``, ``array.reduce`` and napari-style
     multiscale consumers in place of one.
 
     Lazy (the default)
@@ -405,7 +405,7 @@ def as_tensorstore(array, *, eager=False, native=True, context=None):
     Notes
     -----
     Falling back is not a failure: for TIFF-backed stores it is the only
-    option, and it is what every array in ``tifffile_zarr`` uses. A native
+    option, and it is what every array in ``formats.tiff`` uses. A native
     open that raises *after* the store looked addressable does warn, since
     that one is unexpected and costs the C++ read path.
     """

@@ -1,11 +1,18 @@
+"""Shared reader machinery: ``pyramid_options`` and the base reader class.
+
+Nothing here is registered with wsidata. The concrete readers live one file per
+format — :mod:`ezslide.readers.tiff`, :mod:`ezslide.readers.vsi` — and each
+declares only what actually differs: which container class to open, which file
+extensions it claims, and how it turns a constructor argument into a series
+index.
+"""
+
 from contextlib import contextmanager
 from contextvars import ContextVar
 
 import numpy as np
 from wsidata import SlideProperties
 from wsidata.reader import ReaderBase
-from .tifffile_zarr import TiffFile
-from wsidata.reader._reader_registry import register
 
 
 # wsidata's open_wsi() accepts **kwargs but never forwards them: it builds the
@@ -43,7 +50,7 @@ def pyramid_options(pyramidalize=None, **options):
     which may not exist or may belong to an unrelated object. Nothing about
     the result looks wrong. Note that ``'mode'`` is nearest-neighbour sampling
     of the window corner, not a majority vote, so thin structures can vanish
-    at depth; see ``zarr_pyramid.block_reduce``.
+    at depth; see ``ezslide.array.reduce.block_reduce``.
 
     Parameters
     ----------
@@ -86,13 +93,25 @@ def pyramid_options(pyramidalize=None, **options):
         _overrides.reset(token)
 
 
-@register("tifffile_zarr")
-class TiffFileZarrReader(ReaderBase):
-    name = "tifffile_zarr"
+
+class ZarrSlideReader(ReaderBase):
+    """Base for every ezslide reader; deliberately not registered.
+
+    Subclasses supply ``name``, ``extensions`` and ``file_cls``; everything
+    else — the pyramid-option resolution, region and thumbnail reads, the
+    detach/re-attach dance wsidata needs for multiprocessing — is the same
+    whatever container is underneath, because they all end up talking to the
+    same ``TiffFile`` interface from :mod:`ezslide.formats`.
+    """
+
     pkg_namespaces = ["tifffile", "zarr", "tensorstore"]   # <- the fix
     pkgs = ["tifffile", "zarr", "tensorstore"]             # pip names, for error messages
-    extensions = (".ndpi", ".tif", ".tiff", ".svs", ".scn", ".bif", ".qptiff")
     supports_scenes = False
+
+    #: Container class ``create_reader`` instantiates — a ``TiffFile`` or one
+    #: of its subclasses. This, plus ``extensions``, is usually the whole of
+    #: what a new format's reader has to say.
+    file_cls = None
 
     #: Subclasses configure pyramidalization declaratively by overriding these;
     #: ``pyramid_options()`` overrides both at call time. Never mutated in
@@ -102,11 +121,18 @@ class TiffFileZarrReader(ReaderBase):
 
     def __init__(self, file, series=0, pyramidalize=None, pyramid=None, **kwargs):
         self.file = str(file)
-        self._series_idx = series
         self._pyramidalize, self._pyramid = self._resolve_pyramid(pyramidalize, pyramid)
         self._kwargs = kwargs
         self.create_reader()
+        # Resolved after create_reader(), not before: a subclass may need the
+        # series count to validate the index, and nothing in create_reader()
+        # reads it.
+        self._series_idx = self._resolve_series(series)
         self.properties = self._build_properties()
+
+    def _resolve_series(self, series):
+        """Hook: turn the constructor's series/scene argument into an index."""
+        return series
 
     @classmethod
     def _resolve_pyramid(cls, pyramidalize, pyramid):
@@ -129,10 +155,10 @@ class TiffFileZarrReader(ReaderBase):
 
     def create_reader(self):
         # also runs on re-attach, so the pyramid options have to be kept around
-        self.set_reader(TiffFile(self.file,
-                                 pyramidalize=self._pyramidalize,
-                                 pyramid=self._pyramid,
-                                 **self._kwargs))
+        self.set_reader(self.file_cls(self.file,
+                                      pyramidalize=self._pyramidalize,
+                                      pyramid=self._pyramid,
+                                      **self._kwargs))
 
     def detach_reader(self):
         if self._reader is not None:            # NOT self.reader
@@ -185,16 +211,3 @@ class TiffFileZarrReader(ReaderBase):
         img = self.series.thumbnail
         img.thumbnail((size, size) if isinstance(size, int) else size)
         return np.asarray(img)
-    
-@register("tifffile_zarr_pyramid")
-class PyramidTiffFileZarrReader(TiffFileZarrReader):
-    """``tifffile_zarr`` with lazy pyramids on by default.
-
-    Convenience only: ``with pyramid_options(pyramidalize=True)`` around
-    ``open_wsi(..., reader='tifffile_zarr')`` does the same thing without a
-    second registered reader.
-    """
-
-    name = "tifffile_zarr_pyramid"
-    pyramidalize_default = True
-    pyramid_defaults = {"cache": "tmp"}

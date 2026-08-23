@@ -24,13 +24,13 @@ Duck typing
 -----------
 Anything exposing ``.shape``, ``.chunks``, ``.dtype``, ``__getitem__`` and
 ``__setitem__`` works: zarr v2, zarr v3, h5py datasets, tensorstore adapters,
-or the lazy views in the companion ``lazy_pyramid`` module. ``.chunks`` is
+or the lazy views in the companion ``pyramid`` module. ``.chunks`` is
 optional on the source and falls back to ``.shape``.
 
 Quick start
 -----------
     >>> import zarr
-    >>> from zarr_pyramid import build_pyramid
+    >>> from ezslide.array.reduce import build_pyramid
     >>> g = zarr.open_group("img.zarr")          # already contains "0"
     >>> build_pyramid(g["0"], g, levels=6, factors=(1, 1, 1, 2, 2))
 
@@ -334,7 +334,7 @@ def build_pyramid(src, group, levels=5, factors=(1, 1, 2, 2), how="mean",
 
     This function is eager: it returns only once every level is fully written.
     For levels that materialize on demand instead, see the companion
-    ``lazy_pyramid`` module.
+    ``pyramid`` module.
 
     Parameters
     ----------

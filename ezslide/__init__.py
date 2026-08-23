@@ -1,6 +1,34 @@
-from . import tifffile_zarr_reader
-from .tifffile_zarr_reader import pyramid_options
-from .tensorstore_zarr import TensorStoreArray, as_tensorstore, tensorstore_context
+"""ezslide — lazy whole-slide image access on tifffile, zarr and tensorstore.
 
-__all__ = ["tifffile_zarr_reader", "pyramid_options",
-           "TensorStoreArray", "as_tensorstore", "tensorstore_context"]
+The package is layered, bottom up:
+
+:mod:`ezslide.array`
+    Format-agnostic lazy-array machinery: the shared chunk cache, tensorstore
+    views, block reduction and lazy pyramids. Knows nothing about slides.
+:mod:`ezslide.vendors`
+    Upstream code kept pristine for re-syncing. ``vsitiff`` turns an Olympus
+    ``.ets`` container into a synthetic BigTIFF that tifffile can read, using
+    the ``.vsi`` tag tree that ``vsimeta`` parses.
+:mod:`ezslide.formats`
+    The slide model — ``TiffFile`` / ``TiffSeries`` / ``TiffLevel`` over a
+    container. ``formats.tiff`` for anything tifffile opens directly,
+    ``formats.vsi`` for cellSens datasets.
+:mod:`ezslide.readers`
+    The wsidata adapters, registered as ``tifffile_zarr``,
+    ``tifffile_zarr_pyramid`` and ``vsi_zarr``.
+
+Each tier depends only on the ones above it in that list. Adding a format means
+a module in ``formats`` that subclasses ``TiffFile`` and overrides ``_open()``,
+plus a module in ``readers`` that subclasses ``ZarrSlideReader`` and names it.
+"""
+
+from . import readers                     # registers the three wsidata readers
+from .readers import ZarrSlideReader, pyramid_options
+from .array.tensorstore_array import (TensorStoreArray, as_tensorstore,
+                                      tensorstore_context)
+from .formats.tiff import TiffFile
+from .formats.vsi import VsiFile, VsiSeries, open_vsi
+
+__all__ = ["readers", "ZarrSlideReader", "pyramid_options",
+           "TensorStoreArray", "as_tensorstore", "tensorstore_context",
+           "TiffFile", "VsiFile", "VsiSeries", "open_vsi"]

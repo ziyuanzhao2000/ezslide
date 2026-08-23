@@ -5,9 +5,9 @@ import tifffile
 import re
 from math import log
 from PIL import Image
-from .global_chunk_cache import make_cache_store
-from .lazy_pyramid import lazy_pyramid
-from .tensorstore_zarr import TensorStoreArray, as_tensorstore
+from ..array.cache import make_cache_store
+from ..array.pyramid import lazy_pyramid
+from ..array.tensorstore_array import TensorStoreArray, as_tensorstore
 
 
 tag_registries = [tifffile.TIFF.TAGS,
@@ -527,19 +527,31 @@ class TiffFile():
             ``{'how': 'mode', 'materialize_below': 3}``.
         """
         self._file = file
-        self._tifffile = tifffile.TiffFile(file, *args, **kwargs)
-        self._zarr_store = tifffile.imread(file, *args, **kwargs, aszarr=True)
-        self._series = [TiffSeries(series, pyramidalize=pyramidalize,
-                                   pyramid=pyramid)
-                        for series in self._tifffile.series]
-        self._kind = kind if kind else self.series[0].kind 
+        self._tifffile = None
+        self._series = self._open(file, *args, pyramidalize=pyramidalize,
+                                  pyramid=pyramid, **kwargs)
+        self._kind = kind if kind else self.series[0].kind
 
         try:
             for series in self._series:
                 series.parse_metadata(self._kind)
         except Exception as e:
             print(f"Warning: could not parse metadata due to {e}")
-            
+
+    def _open(self, file, *args, pyramidalize=False, pyramid=None, **kwargs):
+        """Open the container and return its series as ezslide ``TiffSeries``.
+
+        The single place that assumes the file is a TIFF. A subclass that
+        reads a container ``tifffile`` cannot open by itself overrides this —
+        see ``formats.vsi.VsiFile`` — and is responsible for setting
+        ``self._tifffile`` to whatever should answer the attribute lookups
+        that fall through ``__getattr__`` (``None`` if nothing should).
+        """
+        self._tifffile = tifffile.TiffFile(file, *args, **kwargs)
+        self._zarr_store = tifffile.imread(file, *args, **kwargs, aszarr=True)
+        return [TiffSeries(series, pyramidalize=pyramidalize, pyramid=pyramid)
+                for series in self._tifffile.series]
+
     @property
     def series(self):
         return self._series
@@ -556,7 +568,13 @@ class TiffFile():
             return [series.data for series in self._series]
         
     def __getattr__(self, name):
-        return getattr(self._tifffile, name)
+        # __dict__ rather than self._tifffile: an override of _open that fails
+        # part-way, or a container with no TIFF behind it, would otherwise send
+        # every missing attribute into infinite recursion.
+        backing = self.__dict__.get('_tifffile')
+        if backing is None:
+            raise AttributeError(name)
+        return getattr(backing, name)
 
     def __repr__(self):
         lines = [f'TiffFile ({self.kind}) from {self._file} with {len(self.series)} image series: ']
@@ -607,7 +625,8 @@ class TiffFile():
         self.close()
         
     def close(self):
-        self._tifffile.close()
+        if self._tifffile is not None:
+            self._tifffile.close()
 
 def remove_invalid_xml_chars(text):
     xml_compliant_text = re.sub(r'[^\x09\x0A\x0D\x20-\uD7FF\uE000-\uFFFD\U00010000-\U0010FFFF]+', '', text)

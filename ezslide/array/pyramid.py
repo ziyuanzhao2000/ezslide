@@ -1,7 +1,7 @@
 """
 Lazy pyramid levels for zarr — nothing is computed until you index into a level.
 
-Where ``zarr_pyramid.build_pyramid`` is eager (it returns once every level is
+Where ``reduce.build_pyramid`` is eager (it returns once every level is
 written), this module gives you level objects that look like arrays but hold no
 data. Reading a region pulls exactly the source region that region needs.
 
@@ -43,7 +43,7 @@ at all.
 Example
 -------
     >>> import zarr
-    >>> from lazy_pyramid import lazy_pyramid
+    >>> from ezslide.array.pyramid import lazy_pyramid
     >>> src = zarr.open_array("img.zarr/0", mode="r")
     >>> pyr = lazy_pyramid(src, levels=6, factors=(1, 1, 1, 2, 2), cache="tmp")
     >>> pyr[3].shape          # known immediately, nothing read
@@ -59,7 +59,7 @@ from itertools import product
 
 import numpy as np
 
-from .zarr_pyramid import block_reduce, plan_blocks, downsample_into
+from .reduce import block_reduce, plan_blocks, downsample_into
 
 __all__ = ["LazyLevel", "CachedLevel", "lazy_pyramid", "make_store"]
 
@@ -426,7 +426,7 @@ def lazy_pyramid(base, levels=6, factors=(1, 1, 2, 2), how="mean",
     keep_chunks : bool
         True (default) gives every level the same chunk shape as ``base``,
         clipped to each level's own shape — matching
-        ``zarr_pyramid.build_pyramid``. This keeps a tile request costing the
+        ``reduce.build_pyramid``. This keeps a tile request costing the
         same number of chunks at every zoom, and keeps lazy and eagerly
         materialized levels in the same pyramid consistent with each other.
         False falls back to per-level ``parent.chunks // factors``, which
@@ -462,7 +462,7 @@ def lazy_pyramid(base, levels=6, factors=(1, 1, 2, 2), how="mean",
     -----
     No OME-NGFF metadata is written, since lazy levels have no canonical
     on-disk home. If you need a spec-compliant dataset, use
-    ``zarr_pyramid.build_pyramid`` instead, or write the ``multiscales``
+    ``reduce.build_pyramid`` instead, or write the ``multiscales``
     attribute yourself once the levels are materialized.
 
     Backing arrays are named ``lazy/{level}`` and created with
