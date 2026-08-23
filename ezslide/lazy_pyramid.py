@@ -31,10 +31,14 @@ read from level 0.
 
 Duck typing
 -----------
-Levels expose ``.shape``, ``.dtype``, ``.ndim``, ``.chunks``, ``__getitem__``
-and ``__array__``, which is enough for ``np.asarray`` and for most viewers
-that accept an array-like per pyramid level. They are not zarr arrays: there is
-no ``__setitem__``, no ``.attrs``, and no store behind ``LazyLevel`` at all.
+Levels expose ``.shape``, ``.dtype``, ``.ndim``, ``.size``, ``.chunks``,
+``__getitem__`` and ``__array__``, which is enough for ``np.asarray`` and for
+most viewers that accept an array-like per pyramid level — in particular it
+satisfies napari's ``LayerDataProtocol`` (``dtype``, ``shape``, ``ndim``,
+``size``, ``__getitem__``), so a level stack can be handed straight to
+``view_image``/``view_labels`` as multiscale data. They are not zarr arrays:
+there is no ``__setitem__``, no ``.attrs``, and no store behind ``LazyLevel``
+at all.
 
 Example
 -------
@@ -176,8 +180,14 @@ class LazyLevel:
         self.chunks = tuple(max(1, min(int(c), s)) for c, s in zip(chunks, self.shape))
 
     @property
+    def size(self):
+        """Element count, as numpy defines it. Never reads anything.
+        """
+        return int(np.prod(self.shape))
+
+    @property
     def nbytes(self):
-        return int(np.prod(self.shape)) * self.dtype.itemsize
+        return self.size * self.dtype.itemsize
 
     def _compute(self, spans):
         """Produce the box described by ``spans`` (one (start, stop) per axis).

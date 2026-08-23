@@ -7,6 +7,7 @@ from math import log
 from PIL import Image
 from .global_chunk_cache import make_cache_store
 from .lazy_pyramid import lazy_pyramid
+from .tensorstore_zarr import TensorStoreArray, as_tensorstore
 
 
 tag_registries = [tifffile.TIFF.TAGS,
@@ -113,8 +114,10 @@ def iter_tiles(array, axes, tile_size=None):
 
     Parameters
     ----------
-    array : zarr array
-        The array to iterate over.
+    array : array-like
+        The array to iterate over — a zarr array, a ``TensorStoreArray``, or
+        a lazy pyramid level. Each tile comes back in whatever the array
+        returns from ``__getitem__``, so a lazy array yields lazy views.
     axes : str
         Axes string for the array, must contain 'Y' and 'X'.
     tile_size : (height, width), optional
@@ -150,7 +153,10 @@ class TiffPage:
 
         base_store = self._page.aszarr()
         cached_store = make_cache_store(base_store)
-        self.data = zarr.open(cached_store)
+        self._zarr = zarr.open(cached_store)
+        # Lazy by default: indexing composes a tensorstore view and decodes
+        # nothing. eagerfy() restores zarr's materialize-on-index behaviour.
+        self.data = as_tensorstore(self._zarr)
         self.delayed_data = da.from_zarr(cached_store)
         self._store = cached_store
 
@@ -173,6 +179,16 @@ class TiffPage:
     def __setitem__(self, key, value):
         self.data[key] = value
 
+    def eagerfy(self):
+        """Return numpy from ``page[sel]`` from now on. Returns ``self``."""
+        self.data.eagerfy()
+        return self
+
+    def lazify(self):
+        """Return lazy tensorstore views from ``page[sel]`` again."""
+        self.data.lazify()
+        return self
+
     def tiles(self, tile_size=None):
         return iter_tiles(self.data, self.axes, tile_size)
 
@@ -190,7 +206,8 @@ class TiffLevel():
             self.delayed_data = da.from_zarr(cached_store, component='0')
         else:
             self.delayed_data = da.from_zarr(cached_store)
-        self.data = initial_array
+        self._zarr = initial_array
+        self.data = as_tensorstore(initial_array)
         self._store = cached_store
         self._metadata = dict([
             (get_tag_name(tag.code), tag.value) for tag in self._level.pages[0].tags
@@ -253,6 +270,25 @@ class TiffLevel():
     def __setitem__(self, key, value):
         self.data[key] = value
 
+    def eagerfy(self):
+        """Materialize on index, for this level and each of its pages.
+
+        A ``LazyTiffLevel`` has neither a tensorstore nor pages — its data is
+        a computed view that already returns numpy — so this is a no-op there
+        and the cascade from a series stays uniform.
+        """
+        for arr in (self.data, *self._pages):
+            if hasattr(arr, 'eagerfy'):
+                arr.eagerfy()
+        return self
+
+    def lazify(self):
+        """Undo ``eagerfy``, for this level and each of its pages."""
+        for arr in (self.data, *self._pages):
+            if hasattr(arr, 'lazify'):
+                arr.lazify()
+        return self
+
     def tiles(self, tile_size=None):
         return iter_tiles(self.data, self.axes, tile_size)
 
@@ -300,6 +336,16 @@ class LazyTiffLevel(TiffLevel):
         if parent is None:                    # during __init__ / unpickling
             raise AttributeError(name)
         return getattr(parent, name)
+
+    # Anything derived from extent must be defined here rather than left to
+    # __getattr__, which would silently answer with level 0's value.
+    @property
+    def size(self):
+        return int(np.prod(self.shape))
+
+    @property
+    def nbytes(self):
+        return self.size * self.dtype.itemsize
 
     @property
     def delayed_data(self):
@@ -357,7 +403,12 @@ class TiffSeries():
         """
         base = self._levels[0]
         axes = infer_axes(base.data, getattr(base, 'axes', None))
-        stack = lazy_pyramid(base.data, levels=levels,
+        # ``block_reduce`` reshapes and pads real numpy blocks, so the pyramid
+        # gets an eager handle on level 0 — a separate wrapper, so whichever
+        # mode a caller has put ``base.data`` in is left alone.
+        source = base.data.eager_view() if isinstance(base.data, TensorStoreArray) \
+            else base.data
+        stack = lazy_pyramid(source, levels=levels,
                              factors=pyramid_factors(axes, factor), how=how,
                              cache=cache, store=store,
                              materialize_below=materialize_below,
@@ -401,7 +452,7 @@ class TiffSeries():
     
     @property
     def thumbnail(self):
-        img = self._levels[-1].data[:]
+        img = np.asarray(self._levels[-1].data[:])
         if len(self.axes) == 2:
             return Image.fromarray(img) # MINISBLACK
         elif len(self.axes) == 3:
@@ -442,6 +493,18 @@ class TiffSeries():
             self.levels[key] = value
         else:
             self.levels[key[0]][key[1:]] = value
+
+    def eagerfy(self):
+        """Make every level of this series materialize on index."""
+        for level in self._levels:
+            level.eagerfy()
+        return self
+
+    def lazify(self):
+        """Make every level of this series return lazy views again."""
+        for level in self._levels:
+            level.lazify()
+        return self
 
     def parse_metadata(self, kind):
         for level in self._levels:
@@ -518,6 +581,25 @@ class TiffFile():
                     self._series[id] = value
                     break
     
+    def eagerfy(self):
+        """Make every series in the file materialize on index.
+
+        The escape hatch for code that wants zarr's old contract back —
+        ``PIL``, ``np.pad``, anything that types its input as ``ndarray``:
+
+            >>> slide = TiffFile(path).eagerfy()
+            >>> slide[0].levels[0][0:512, 0:512]   # np.ndarray, read now
+        """
+        for series in self._series:
+            series.eagerfy()
+        return self
+
+    def lazify(self):
+        """Make every series in the file return lazy views again."""
+        for series in self._series:
+            series.lazify()
+        return self
+
     def __enter__(self):
         return self
     
@@ -563,11 +645,12 @@ class TiffWriter(tifffile.TiffWriter):
             kwargs['tile']=tile_size
             shape = level.data.shape
             if write_tiles:
-                data = level.tiles(tile_size)
+                # tifffile writes pixels, so materialize each tile as it goes
+                data = (np.asarray(tile) for tile in level.tiles(tile_size))
                 if level.axes == 'YXS':
                     shape = tuple([shape[i] for i  in [2, 0, 1]])
             else:
-                data = level.data[:]
+                data = np.asarray(level.data[:])
             if level.level_id == 0: # base level
                 metadata.update({'Name': level.name})
             if not 'photometric' in kwargs:

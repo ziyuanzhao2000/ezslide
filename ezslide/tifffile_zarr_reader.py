@@ -89,8 +89,8 @@ def pyramid_options(pyramidalize=None, **options):
 @register("tifffile_zarr")
 class TiffFileZarrReader(ReaderBase):
     name = "tifffile_zarr"
-    pkg_namespaces = ["tifffile", "zarr"]          # <- the fix
-    pkgs = ["tifffile", "zarr"]                    # pip names, for error messages
+    pkg_namespaces = ["tifffile", "zarr", "tensorstore"]   # <- the fix
+    pkgs = ["tifffile", "zarr", "tensorstore"]             # pip names, for error messages
     extensions = (".ndpi", ".tif", ".tiff", ".svs", ".scn", ".bif", ".qptiff")
     supports_scenes = False
 
