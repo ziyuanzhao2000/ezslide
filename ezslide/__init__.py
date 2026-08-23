@@ -4,7 +4,8 @@ The package is layered, bottom up:
 
 :mod:`ezslide.array`
     Format-agnostic lazy-array machinery: the shared chunk cache, tensorstore
-    views, block reduction and lazy pyramids. Knows nothing about slides.
+    views, block reduction, lazy pyramids, and the rechunker that retiles an
+    array from one chunk grid onto another. Knows nothing about slides.
 :mod:`ezslide.vendors`
     Upstream code kept pristine for re-syncing. ``vsitiff`` turns an Olympus
     ``.ets`` container into a synthetic BigTIFF that tifffile can read, using
@@ -32,9 +33,11 @@ from .array.tensorstore_array import (TensorStoreArray, as_tensorstore,
                                       tensorstore_context)
 from .formats.tiff import TiffFile
 from .formats.vsi import VsiFile, VsiSeries, open_vsi
+from .array.rechunk import RechunkPlan, iter_rechunked, plan_rechunk
 from .writers import convert, write_ome_tiff
 
 __all__ = ["readers", "writers", "ZarrSlideReader", "pyramid_options",
            "TensorStoreArray", "as_tensorstore", "tensorstore_context",
            "TiffFile", "VsiFile", "VsiSeries", "open_vsi",
-           "convert", "write_ome_tiff"]
+           "convert", "write_ome_tiff",
+           "plan_rechunk", "iter_rechunked", "RechunkPlan"]

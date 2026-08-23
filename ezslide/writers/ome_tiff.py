@@ -35,11 +35,13 @@ from __future__ import annotations
 
 import datetime
 import os
+import warnings
 from pathlib import Path
 
 import numpy as np
 import tifffile
 
+from ..array.rechunk import DEFAULT_MAX_MEM, iter_rechunked, plan_rechunk
 from ..formats.tiff import TiffFile, TiffLevel, TiffSeries, infer_axes
 from ..formats.vsi import VsiFile
 
@@ -73,47 +75,29 @@ _DEFAULT_TILE = (512, 512)
 # tiles
 # --------------------------------------------------------------------------
 
-def _level_tiles(level, tile):
+def _level_tiles(level, tile, max_mem=DEFAULT_MAX_MEM, plan=None,
+                 use_cache=True):
     """Yield ``level``'s tiles in the order tifffile consumes them.
 
-    Row-major within a plane, plane-major across pages, and — unlike
-    :func:`ezslide.formats.tiff.iter_tiles` — the sample axis stays *inside*
-    each tile for a contiguous layout. Feeding tifffile per-sample tiles for a
-    ``YXS`` image is what makes an interleaved source come back out planar.
-
-    Each tile is materialized only as it is handed over, so peak memory is one
-    tile regardless of how large the level is.
+    Delegates to :func:`ezslide.array.rechunk.iter_rechunked`, which keeps the
+    sample axis inside each tile, emits page-major then row-major, and — when
+    the output tile does not line up with the source chunk grid — buffers a
+    band so each source chunk is decoded once instead of once per tile that
+    touches it. Peak memory is the plan's block, never a whole level.
     """
-    axes = infer_axes(level.data, getattr(level, 'axes', None))
-    y_ax, x_ax = axes.index('Y'), axes.index('X')
-    shape = tuple(level.data.shape)
-    th, tw = tile
-
-    # Axes that are neither Y/X nor a contiguous sample axis become separate
-    # TIFF pages, and tifffile wants them iterated outermost.
-    contig = axes.endswith('YXS') or (axes.endswith('S') and x_ax < axes.index('S'))
-    page_axes = [i for i, a in enumerate(axes)
-                 if a not in 'YX' and not (contig and a == 'S')]
-
-    for page in np.ndindex(*[shape[i] for i in page_axes]):
-        for y in range(0, shape[y_ax], th):
-            for x in range(0, shape[x_ax], tw):
-                index = [slice(None)] * len(shape)
-                for axis, value in zip(page_axes, page):
-                    index[axis] = value
-                index[y_ax] = slice(y, min(y + th, shape[y_ax]))
-                index[x_ax] = slice(x, min(x + tw, shape[x_ax]))
-                yield np.ascontiguousarray(np.asarray(level[tuple(index)]))
+    return iter_rechunked(level, tile, axes=getattr(level, 'axes', None),
+                          max_mem=max_mem, plan=plan, use_cache=use_cache,
+                          warn=False)
 
 
-def _grouped_tiles(levels, tile):
+def _grouped_tiles(levels, tile, **kwargs):
     """Tiles for one pyramid level of a merged multi-channel image.
 
     ``levels`` is one level taken from each member series, in channel order;
     they are written as consecutive pages of a single ``CYX`` image.
     """
     for level in levels:
-        yield from _level_tiles(level, tile)
+        yield from _level_tiles(level, tile, **kwargs)
 
 
 # --------------------------------------------------------------------------
@@ -257,6 +241,7 @@ def _samples(level):
 
 def write_ome_tiff(obj, path, *, levels=None, tile=None, compression='zstd',
                    photometric=None, source=None, reader=None,
+                   max_mem=DEFAULT_MAX_MEM, use_cache=None,
                    bigtiff=True, **kwargs):
     """Write a slide, series or level to a pyramidal OME-TIFF.
 
@@ -296,7 +281,8 @@ def write_ome_tiff(obj, path, *, levels=None, tile=None, compression='zstd',
         for group in groups:
             _write_group(writer, group, levels=levels, tile=tile,
                          compression=compression, photometric=photometric,
-                         source=source, reader=reader, **kwargs)
+                         source=source, reader=reader, max_mem=max_mem,
+                         use_cache=use_cache, **kwargs)
     return path
 
 
@@ -337,7 +323,8 @@ class _SingleLevel:
 
 
 def _write_group(writer, group, *, levels, tile, compression, photometric,
-                 source, reader, **kwargs):
+                 source, reader, max_mem=DEFAULT_MAX_MEM, use_cache=None,
+                 **kwargs):
     """Write one OME image — one series, or several merged as channels."""
     lead = group[0]
     depth = min(len(s.levels) for s in group)
@@ -354,14 +341,31 @@ def _write_group(writer, group, *, levels, tile, compression, photometric,
     md0 = base.metadata
     meta = _ome_fields(lead, channel_names, source=source, reader=reader)
 
+    # One plan per image rather than per level, so the warning fires once with
+    # a tile size the caller can actually act on.
+    base_plan = _plan_for(base, tile, max_mem)
+    if base_plan is not None and base_plan.amplification > 1.5:
+        who = lead.name or getattr(lead, 'kind', None) or 'image'
+        warnings.warn(
+            f'{who}: writing {tile[0]}x{tile[1]} tiles from a '
+            f'{base_plan.source_chunks[0]}x{base_plan.source_chunks[1]} source '
+            f'grid re-reads source chunks — {base_plan}',
+            stacklevel=3,
+        )
+    # Once the plan guarantees each source chunk is read once, depositing them
+    # in the shared pool only evicts whatever else is cached.
+    if use_cache is None:
+        use_cache = base_plan is None or base_plan.amplification > 1.5
+    opts = {'max_mem': max_mem, 'use_cache': use_cache}
+
     for i in range(depth):
         members = [s.levels[i] for s in group]
         first = members[0]
         shape, axes = _out_shape(first, len(group))
         resolution, unit = _resolution(first, _scaled(md0, base, first))
         writer.write(
-            _grouped_tiles(members, tile) if len(group) > 1
-            else _level_tiles(first, tile),
+            _grouped_tiles(members, tile, **opts) if len(group) > 1
+            else _level_tiles(first, tile, **opts),
             shape=shape,
             dtype=np.dtype(first.data.dtype),
             tile=tile,
@@ -376,6 +380,20 @@ def _write_group(writer, group, *, levels, tile, compression, photometric,
             metadata={'axes': axes, **meta} if i == 0 else None,
             **kwargs,
         )
+
+
+def _plan_for(level, tile, max_mem):
+    """The rechunk plan for one level, or None if its grid is unknowable."""
+    data = getattr(level, 'data', level)
+    chunks = getattr(data, 'chunks', None)
+    if not chunks:
+        return None
+    try:
+        return plan_rechunk(chunks, tile, tuple(data.shape), data.dtype,
+                            axes=infer_axes(data, getattr(level, 'axes', None)),
+                            max_mem=max_mem)
+    except Exception:  # noqa: BLE001 - planning is advisory, never fatal
+        return None
 
 
 def _out_shape(level, nmembers):
@@ -405,16 +423,29 @@ def _scaled(md0, base, level):
 
 
 def _source_tile(level):
-    """Reuse the source's own tiling so nothing is re-gridded needlessly."""
+    """Reuse the source's own tiling so nothing is re-gridded needlessly.
+
+    TIFF requires tile dimensions to be multiples of 16, which a source grid
+    often is not — a striped file reports something like ``(3, 66833)``. Rather
+    than dropping straight to a fixed default, round each axis to a nearby
+    multiple of 16 when the source chunk is tile-shaped at all; the rechunker
+    then absorbs whatever mismatch is left.
+    """
     chunks = getattr(level.data, 'chunks', None)
     axes = infer_axes(level.data, getattr(level, 'axes', None))
     if not chunks:
         return _DEFAULT_TILE
-    th, tw = chunks[axes.index('Y')], chunks[axes.index('X')]
-    # TIFF requires tile dimensions to be multiples of 16.
-    if th % 16 or tw % 16 or th < 16 or tw < 16:
-        return _DEFAULT_TILE
-    return (int(th), int(tw))
+    th, tw = int(chunks[axes.index('Y')]), int(chunks[axes.index('X')])
+    out = []
+    for size, extent in ((th, level.data.shape[axes.index('Y')]),
+                         (tw, level.data.shape[axes.index('X')])):
+        # A chunk spanning (nearly) the whole extent is a strip, not a tile;
+        # there is no sensible output tile to inherit from it.
+        if size < 16 or size >= extent or size > 8192:
+            out.append(_DEFAULT_TILE[0])
+        else:
+            out.append(size - size % 16 if size % 16 else size)
+    return (out[0], out[1])
 
 
 # --------------------------------------------------------------------------
@@ -422,7 +453,7 @@ def _source_tile(level):
 # --------------------------------------------------------------------------
 
 def convert(src, dst, *, series=0, levels=None, tile=None,
-            compression='zstd', **kwargs):
+            compression='zstd', max_mem=DEFAULT_MAX_MEM, **kwargs):
     """Convert a slide file to a pyramidal, calibrated OME-TIFF.
 
     The whole point of the exercise::
@@ -446,7 +477,8 @@ def convert(src, dst, *, series=0, levels=None, tile=None,
         target = slide if series == 'all' else _with_siblings(slide, series)
         return write_ome_tiff(target, dst, levels=levels, tile=tile,
                               compression=compression, source=src,
-                              reader=type(slide).__name__, **kwargs)
+                              reader=type(slide).__name__, max_mem=max_mem,
+                              **kwargs)
     finally:
         slide.close()
 

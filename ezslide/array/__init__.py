@@ -14,4 +14,12 @@ Nothing here knows what a slide is. These are the pieces the format modules in
 ``pyramid``
     ``lazy_pyramid`` — pyramid levels that know their shape up front and
     compute pixels only when indexed.
+``rechunk``
+    ``plan_rechunk`` / ``iter_rechunked`` — read an array on one chunk grid and
+    emit it on another, each source chunk decoded once, within a stated memory
+    budget. What the OME-TIFF writer uses to retile a slide.
 """
+
+from .rechunk import DEFAULT_MAX_MEM, RechunkPlan, iter_rechunked, plan_rechunk
+
+__all__ = ["plan_rechunk", "iter_rechunked", "RechunkPlan", "DEFAULT_MAX_MEM"]
