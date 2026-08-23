@@ -16,19 +16,25 @@ The package is layered, bottom up:
 :mod:`ezslide.readers`
     The wsidata adapters, registered as ``tifffile_zarr``,
     ``tifffile_zarr_pyramid`` and ``vsi_zarr``.
+:mod:`ezslide.writers`
+    The way back out. ``convert(src, dst)`` streams any slide ezslide reads
+    into a pyramidal OME-TIFF that keeps the calibration and metadata the
+    reader recovered.
 
 Each tier depends only on the ones above it in that list. Adding a format means
 a module in ``formats`` that subclasses ``TiffFile`` and overrides ``_open()``,
 plus a module in ``readers`` that subclasses ``ZarrSlideReader`` and names it.
 """
 
-from . import readers                     # registers the three wsidata readers
+from . import readers, writers           # importing readers registers them
 from .readers import ZarrSlideReader, pyramid_options
 from .array.tensorstore_array import (TensorStoreArray, as_tensorstore,
                                       tensorstore_context)
 from .formats.tiff import TiffFile
 from .formats.vsi import VsiFile, VsiSeries, open_vsi
+from .writers import convert, write_ome_tiff
 
-__all__ = ["readers", "ZarrSlideReader", "pyramid_options",
+__all__ = ["readers", "writers", "ZarrSlideReader", "pyramid_options",
            "TensorStoreArray", "as_tensorstore", "tensorstore_context",
-           "TiffFile", "VsiFile", "VsiSeries", "open_vsi"]
+           "TiffFile", "VsiFile", "VsiSeries", "open_vsi",
+           "convert", "write_ome_tiff"]

@@ -2,8 +2,6 @@ import zarr
 import dask.array as da
 import numpy as np
 import tifffile
-import re
-from math import log
 from PIL import Image
 from ..array.cache import make_cache_store
 from ..array.pyramid import lazy_pyramid
@@ -77,6 +75,88 @@ def recover_mpp(level):
 
 def TIFFParser(level):
     return recover_mpp(level)
+
+
+#: Namespaces of the MapAnnotations ``ezslide.writers.ome_tiff`` emits. Kept
+#: here as literals rather than imported, so the read path does not drag in the
+#: writer.
+_EZSLIDE_NAMESPACES = ('ezslide:metadata', 'ezslide:provenance')
+
+
+def recover_ome_annotations(tifffile_obj, image_index=0):
+    """Metadata recovered from an OME-TIFF's XML, for one image in the file.
+
+    Two things come back that ``tifffile`` will not hand over on its own:
+
+    * ``ChannelNames``, read from the OME ``Channel`` elements. True of any
+      OME-TIFF, not only ones ezslide wrote.
+    * whatever ``ezslide.writers.ome_tiff`` stored in its ``MapAnnotation`` —
+      objective, magnification, source path, original codec. ``tifffile``
+      writes these happily but only parses ``modulo`` annotations back, so a
+      converted slide would otherwise return with its calibration and none of
+      its provenance. Closing that loop is the reason the writer records them.
+
+    Results are keyed per image, since one file may hold several.
+    """
+    if tifffile_obj is None:
+        return {}
+    # Parsed once per file, not once per level: a cellSens dataset can hold
+    # fifty series of nine levels each, and the XML does not change.
+    cached = getattr(tifffile_obj, '_ezslide_annotations', None)
+    if cached is None:
+        cached = _parse_ome_annotations(tifffile_obj)
+        try:
+            tifffile_obj._ezslide_annotations = cached
+        except AttributeError:
+            pass
+    if not cached:
+        return {}
+    return cached[image_index] if image_index < len(cached) else {}
+
+
+def _parse_ome_annotations(tifffile_obj):
+    """``[{...}, ...]`` — recovered metadata per OME Image, in document order."""
+    xml = getattr(tifffile_obj, 'ome_metadata', None)
+    if not xml:
+        return []
+    from xml.etree import ElementTree
+
+    try:
+        root = ElementTree.fromstring(xml)
+    except ElementTree.ParseError:
+        return []
+
+    # Annotations live once at the root and are referenced by ID from each
+    # image, so resolve them before walking the images.
+    by_id = {}
+    for element in root.iter():
+        if not element.tag.endswith('MapAnnotation'):
+            continue
+        if element.get('Namespace') not in _EZSLIDE_NAMESPACES:
+            continue
+        entries = {}
+        for value in element:
+            for entry in value:
+                key = entry.get('K')
+                if key:
+                    entries[key] = entry.text
+        by_id[element.get('ID')] = entries
+
+    images = []
+    for image in root.iter():
+        if not image.tag.endswith('}Image'):
+            continue
+        recovered = {}
+        for ref in image.iter():
+            if ref.tag.endswith('AnnotationRef'):
+                recovered.update(by_id.get(ref.get('ID'), {}))
+        names = [c.get('Name') for c in image.iter()
+                 if c.tag.endswith('}Channel') and c.get('Name')]
+        if names:
+            recovered['ChannelNames'] = names
+        images.append(recovered)
+    return images
+
 
 def NDPIParser(metadata):
     return metadata
@@ -294,12 +374,35 @@ class TiffLevel():
 
     def parse_metadata(self, kind):
         metadata = {}
+        # Annotations first: a slide ezslide converted carries its objective,
+        # magnification and provenance here, and anything the TIFF tags say
+        # about this file should win over what they say about its ancestor.
+        metadata.update(recover_ome_annotations(self._parent_tifffile(),
+                                                self._image_index()))
         metadata.update(TIFFParser(self._level))
         if kind == 'ndpi':
             parser = NDPIParser
         else:
             parser = lambda x: x
         self._parsed_metadata = parser(metadata)
+
+    def _parent_tifffile(self):
+        """The ``tifffile.TiffFile`` this level came out of, if reachable."""
+        try:
+            return self._level.pages[0].parent
+        except (AttributeError, IndexError):
+            return None
+
+    def _image_index(self):
+        """Position of this level's series in the file, for per-image metadata."""
+        tif = self._parent_tifffile()
+        if tif is None:
+            return 0
+        for i, series in enumerate(getattr(tif, 'series', ())):
+            if self._level is series or any(self._level is lv
+                                            for lv in series.levels):
+                return i
+        return 0
 
 class LazyTiffLevel(TiffLevel):
     """A pyramid level that is not in the file — computed from the level above.
@@ -437,7 +540,21 @@ class TiffSeries():
     @property
     def levels(self):
         return self._levels
-    
+
+    @property
+    def channel_group_key(self):
+        """Key shared by series that are channels of one multi-channel image.
+
+        ``None`` — the default and the answer for any format that puts a whole
+        image in one series — means "write me as my own image". A format whose
+        reader splits channels across series (see ``VsiSeries``) returns a key
+        identifying the parent image, and the OME writer merges the group into
+        a single ``CYX`` image with per-channel names. Keeping the key here
+        rather than in the writer is what lets the writer stay ignorant of any
+        particular file format.
+        """
+        return None
+
     @property
     def name(self):
         if hasattr(self._series, 'name'):
@@ -624,96 +741,15 @@ class TiffFile():
     def __exit__(self, *args):
         self.close()
         
+    def to_ome_tiff(self, path, **kwargs):
+        """Write this slide out as a pyramidal, calibrated OME-TIFF.
+
+        Thin sugar over :func:`ezslide.write_ome_tiff`; imported lazily so the
+        read path never pulls in the writer.
+        """
+        from ..writers.ome_tiff import write_ome_tiff
+        return write_ome_tiff(self, path, source=self._file, **kwargs)
+
     def close(self):
         if self._tifffile is not None:
             self._tifffile.close()
-
-def remove_invalid_xml_chars(text):
-    xml_compliant_text = re.sub(r'[^\x09\x0A\x0D\x20-\uD7FF\uE000-\uFFFD\U00010000-\U0010FFFF]+', '', text)
-    return xml_compliant_text
-
-class TiffWriter(tifffile.TiffWriter):
-    def __init__(self, file, *args, **kwargs):
-        self.file = file
-        super().__init__(file, *args, **kwargs)
-
-    def __getattr__(self, name):
-        return getattr(self._tifffile, name)
-    
-    def write(self, 
-            tiff_obj, 
-            metadata={},
-            write_tiles=True, 
-            *args, **kwargs):
-        
-        if isinstance(tiff_obj, TiffLevel):
-            level = tiff_obj
-            serialized = dict([(remove_invalid_xml_chars(str(key)), 
-                                remove_invalid_xml_chars(str(val))) for key, val in level.metadata.items()])
-            metadata.update(serialized)
-            metadata.update({'MapAnnotation': serialized,})
-            tile_size = kwargs.get("tile", None)
-            if tile_size is None:
-                min_size = min(level.width, level.height)
-                if min_size > 1024:
-                    tile_size = (1024, 1024)
-                else:
-                    s = 2**(int(log(min_size, 2)))
-                    tile_size = (s, s)
-            print(tile_size)
-            kwargs['tile']=tile_size
-            shape = level.data.shape
-            if write_tiles:
-                # tifffile writes pixels, so materialize each tile as it goes
-                data = (np.asarray(tile) for tile in level.tiles(tile_size))
-                if level.axes == 'YXS':
-                    shape = tuple([shape[i] for i  in [2, 0, 1]])
-            else:
-                data = np.asarray(level.data[:])
-            if level.level_id == 0: # base level
-                metadata.update({'Name': level.name})
-            if not 'photometric' in kwargs:
-                if isinstance(level.metadata['BitsPerSample'], int):
-                    photometric = 'MINISBLACK'
-                elif isinstance(level.metadata['BitsPerSample'], tuple):
-                    if len(level.metadata['BitsPerSample']) == 3:
-                        photometric = 'RGB'
-                    else:
-                        photometric = 'MINISBLACK'
-                kwargs['photometric'] = photometric
-            super().write(data, 
-                        metadata=metadata, 
-                        shape=shape,
-                        dtype=level.data.dtype,
-                        *args, **kwargs)
-        elif isinstance(tiff_obj, TiffSeries):
-            series = tiff_obj
-            subresolutions = len(series.levels) - 1
-            if subresolutions == 0:
-                self.write(series.levels[0], 
-                        metadata=metadata, 
-                        write_tiles=write_tiles,
-                        *args,
-                        **kwargs)
-            else:
-                self.write(series.levels[0], 
-                        metadata=metadata, 
-                        write_tiles=write_tiles,
-                        subifds=subresolutions,
-                        *args,
-                        **kwargs)
-                for level in series.levels[1:]:
-                    self.write(level, 
-                        metadata=metadata, 
-                        write_tiles=write_tiles,
-                        subfiletype=1,
-                        *args,
-                        **kwargs)
-        elif isinstance(tiff_obj, TiffFile):
-            file = tiff_obj
-            for series in file.series:
-                self.write(series, 
-                           metadata=metadata,
-                           write_tiles=write_tiles,
-                           *args,
-                           **kwargs)

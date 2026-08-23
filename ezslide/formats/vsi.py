@@ -91,6 +91,21 @@ class VsiSeries(TiffSeries):
         return dict(self._plane)
 
     @property
+    def channel_group_key(self):
+        """Identify the stack this plane belongs to, for the OME writer.
+
+        ETS keeps every channel of a scan in one ``.ets`` chunk table and
+        ezslide splits them into a series each, which is the right shape for
+        reading but the wrong shape for OME: there, a fluorescence scan is one
+        image with N channels. Series sharing this key are merged back into a
+        single ``CYX`` image on write. ``None`` for a brightfield stack, which
+        is already one image.
+        """
+        if self._channel is None:
+            return None
+        return (str(self._ets.path), self._ets.stack)
+
+    @property
     def is_overview(self):
         """True for the label / macro / overview stacks, not the slide."""
         return self._ets.is_overview
