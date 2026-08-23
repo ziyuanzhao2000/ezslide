@@ -253,19 +253,29 @@ def _source_array(level, use_cache):
     reads; it would be actively harmful for a strategy that relies on re-reads.
 
     Falls back to the level itself whenever a private store cannot be opened —
-    a ``LazyTiffLevel`` has no tifffile series behind it.
+    a ``LazyTiffLevel`` is computed from its parent and has no series of its
+    own.
     """
     if use_cache:
         return level
-    series = getattr(level, '_level', None)
+    # __dict__, never getattr: LazyTiffLevel.__getattr__ forwards misses to its
+    # parent, so getattr(lazy_level, '_level') hands back *level 0's* series
+    # and the bypass would silently read level-0 pixels at this level's
+    # coordinates.
+    series = level.__dict__.get('_level')
     if series is None:
         return level
     try:
         import zarr
         store = zarr.open(series.aszarr(), mode='r')
-        return store['0'] if isinstance(store, zarr.Group) else store
+        array = store['0'] if isinstance(store, zarr.Group) else store
     except Exception:  # noqa: BLE001 - bypass is an optimization, never required
         return level
+    # A private store that does not describe this level is a wrong-pixels bug
+    # waiting to happen; no performance flag is worth that.
+    if tuple(array.shape) != tuple(getattr(level, 'data', level).shape):
+        return level
+    return array
 
 
 def iter_rechunked(level, out_chunks, axes=None, max_mem=DEFAULT_MAX_MEM,

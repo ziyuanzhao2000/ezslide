@@ -19,6 +19,9 @@ dependencies = [
     "wsidata>=0.11.0",
 ]
 
+[project.scripts]
+ezslide = "ezslide.cli:main"
+
 [project.urls]
 Homepage = "https://github.com/ziyuanzhao2000/ezslide"
 Issues = "https://github.com/ziyuanzhao2000/ezslide/issues"

@@ -29,11 +29,37 @@ add about a megabyte of XML per level.
 
 Reading one back with ezslide restores the annotation into level metadata, so a
 converted slide carries the same information as the original.
+
+What the writer needs from what you give it
+-------------------------------------------
+Everything here is duck-typed, deliberately: it is the extension point that
+lets :mod:`ezslide.cli` merge separate files into channels or split an RGB
+image apart without the writer learning anything about either. Anything
+satisfying this can be written.
+
+**A series** must have:
+
+``levels``            sequence of level objects, coarsest last
+``name``              str or None
+``channel``           optional: this plane's label, or None
+``channel_group_key`` optional: series sharing a key are merged into one
+                      ``CYX`` image; None means "write me as my own image"
+``channel_names``     optional: list of names
+
+**A level** must have:
+
+``data``              array-like with ``.shape``, ``.dtype``, ``.chunks``
+``axes``              axis codes for ``data``, e.g. ``'YXS'``
+``metadata``          dict; ``PhysicalSizeX`` and friends are read from it
+``width``             pixels along X
+``__getitem__``       tuple indexing, returning something ``np.asarray`` takes
 """
 
 from __future__ import annotations
 
+import contextlib
 import datetime
+import logging
 import os
 import warnings
 from pathlib import Path
@@ -41,7 +67,10 @@ from pathlib import Path
 import numpy as np
 import tifffile
 
+import zarr
+
 from ..array.rechunk import DEFAULT_MAX_MEM, iter_rechunked, plan_rechunk
+from ..array.reduce import block_reduce
 from ..formats.tiff import TiffFile, TiffLevel, TiffSeries, infer_axes
 from ..formats.vsi import VsiFile
 
@@ -240,7 +269,8 @@ def _samples(level):
 # --------------------------------------------------------------------------
 
 def write_ome_tiff(obj, path, *, levels=None, tile=None, compression='zstd',
-                   photometric=None, source=None, reader=None,
+                   photometric=None, source=None, reader=None, pyramid=True,
+                   downsample='mean', metadata=None,
                    max_mem=DEFAULT_MAX_MEM, use_cache=None,
                    bigtiff=True, **kwargs):
     """Write a slide, series or level to a pyramidal OME-TIFF.
@@ -278,11 +308,14 @@ def write_ome_tiff(obj, path, *, levels=None, tile=None, compression='zstd',
     groups = _channel_groups(series_list)
 
     with tifffile.TiffWriter(path, bigtiff=bigtiff, ome=True) as writer:
+        page0 = 0
         for group in groups:
-            _write_group(writer, group, levels=levels, tile=tile,
+            page0 += _write_group(writer, group, levels=levels, tile=tile,
                          compression=compression, photometric=photometric,
-                         source=source, reader=reader, max_mem=max_mem,
-                         use_cache=use_cache, **kwargs)
+                         source=source, reader=reader, path=path,
+                         image_index=page0, pyramid=pyramid,
+                         downsample=downsample, overrides=metadata,
+                         max_mem=max_mem, use_cache=use_cache, **kwargs)
     return path
 
 
@@ -323,16 +356,26 @@ class _SingleLevel:
 
 
 def _write_group(writer, group, *, levels, tile, compression, photometric,
-                 source, reader, max_mem=DEFAULT_MAX_MEM, use_cache=None,
-                 **kwargs):
+                 source, reader, path=None, image_index=0, pyramid=True,
+                 downsample='mean', overrides=None,
+                 max_mem=DEFAULT_MAX_MEM, use_cache=None, **kwargs):
     """Write one OME image — one series, or several merged as channels."""
     lead = group[0]
-    depth = min(len(s.levels) for s in group)
-    if levels is not None:
-        depth = min(depth, max(1, int(levels)))
-
     base = lead.levels[0]
     tile = tuple(tile) if tile else _source_tile(base)
+
+    have = min(s.levels and len(s.levels) or 1 for s in group)
+    # A source that already carries a pyramid keeps it; generation only fills
+    # in for flat inputs, which is where a viewer would otherwise struggle.
+    generate = bool(pyramid) and have == 1 and path is not None
+    if generate:
+        spatial = _spatial_shape(base)
+        depth = _pyramid_depth(spatial, tile,
+                               cap=int(levels) if levels else None)
+    else:
+        depth = have
+        if levels is not None:
+            depth = min(depth, max(1, int(levels)))
     channel_names = _group_channel_names(group)
     samples = _samples(base)
     if photometric is None:
@@ -340,6 +383,10 @@ def _write_group(writer, group, *, levels, tile, compression, photometric,
 
     md0 = base.metadata
     meta = _ome_fields(lead, channel_names, source=source, reader=reader)
+    if overrides:
+        # Explicit values win over whatever the reader recovered: an input with
+        # missing or wrong metadata is exactly why a caller passes these.
+        meta.update({k: v for k, v in overrides.items() if v is not None})
 
     # One plan per image rather than per level, so the warning fires once with
     # a tile size the caller can actually act on.
@@ -358,16 +405,29 @@ def _write_group(writer, group, *, levels, tile, compression, photometric,
         use_cache = base_plan is None or base_plan.amplification > 1.5
     opts = {'max_mem': max_mem, 'use_cache': use_cache}
 
+    base_shape, base_axes = _out_shape(base, len(group))
+    dtype = np.dtype(base.data.dtype)
+
     for i in range(depth):
-        members = [s.levels[i] for s in group]
-        first = members[0]
-        shape, axes = _out_shape(first, len(group))
-        resolution, unit = _resolution(first, _scaled(md0, base, first))
+        if generate and i:
+            # Level i is reduced from level i-1 of the file being written.
+            shape = _halved(base_shape, base_axes, i)
+            axes = base_axes
+            data = _readback_tiles(writer, path, image_index,
+                                   _pages_per_image(base_shape, base_axes),
+                                   i - 1, tile, downsample)
+            resolution, unit = _resolution(base, _scale_md(md0, 2 ** i))
+        else:
+            members = [s.levels[i] for s in group]
+            first = members[0]
+            shape, axes = _out_shape(first, len(group))
+            data = (_grouped_tiles(members, tile, **opts) if len(group) > 1
+                    else _level_tiles(first, tile, **opts))
+            resolution, unit = _resolution(first, _scaled(md0, base, first))
         writer.write(
-            _grouped_tiles(members, tile, **opts) if len(group) > 1
-            else _level_tiles(first, tile, **opts),
+            data,
             shape=shape,
-            dtype=np.dtype(first.data.dtype),
+            dtype=dtype,
             tile=tile,
             photometric=photometric,
             compression=compression,
@@ -380,6 +440,7 @@ def _write_group(writer, group, *, levels, tile, compression, photometric,
             metadata={'axes': axes, **meta} if i == 0 else None,
             **kwargs,
         )
+    return _pages_per_image(base_shape, base_axes)
 
 
 def _plan_for(level, tile, max_mem):
@@ -394,6 +455,119 @@ def _plan_for(level, tile, max_mem):
                             max_mem=max_mem)
     except Exception:  # noqa: BLE001 - planning is advisory, never fatal
         return None
+
+
+class _ReadbackLevel:
+    """A level of the half-written output, presented to the rechunker."""
+
+    def __init__(self, array, axes):
+        self.data = array
+        self.axes = axes
+
+    def __getitem__(self, key):
+        return self.data[key]
+
+
+def _spatial_shape(level):
+    """``(height, width)`` of a level, whatever its axis order."""
+    axes = infer_axes(level.data, getattr(level, 'axes', None))
+    shape = tuple(level.data.shape)
+    return (shape[axes.index('Y')], shape[axes.index('X')])
+
+
+def _halved(shape, axes, times):
+    """``shape`` with Y and X halved ``times`` over, rounding up.
+
+    Matches what ``block_reduce`` produces when applied repeatedly, so the
+    declared level shape and the generated pixels always agree.
+    """
+    out = list(shape)
+    for axis in (axes.index('Y'), axes.index('X')):
+        out[axis] = -(-out[axis] // (2 ** times))
+    return tuple(out)
+
+
+def _scale_md(md, factor):
+    """Level-0 metadata with the physical pixel size scaled by ``factor``."""
+    out = dict(md)
+    for key in ('PhysicalSizeX', 'PhysicalSizeY'):
+        if out.get(key):
+            out[key] = float(out[key]) * factor
+    return out
+
+
+def _pyramid_depth(shape_hw, tile, cap=None):
+    """Number of levels needed for the top to fit in one tile.
+
+    The same rule ``pyramid_assemble.py`` uses, so a flat input converted here
+    comes out with the level count people already expect.
+    """
+    longest, step = max(shape_hw), max(tile)
+    depth = 1
+    if longest > step:
+        depth = int(np.ceil(np.log2(longest / step))) + 1
+    depth = max(depth, 1)
+    return min(depth, cap) if cap else depth
+
+
+def _readback_tiles(writer, path, page0, nchannels, level, tile, downsample):
+    """Tiles for ``level + 1``, reduced from ``level`` of the output file.
+
+    This is what makes pyramid generation streaming: instead of chaining lazy
+    views back to the source (or spilling them into a temp store that nothing
+    cleans up), each level is read straight out of what was just written —
+    local, already compressed, and read exactly once.
+
+    ``iter_rechunked`` at twice the output tile is the trick: it yields exactly
+    one 2x block per output tile, in raster order, decoding each chunk of the
+    previous level once and respecting the memory budget.
+    """
+    writer.filehandle.flush()          # the reader below opens its own handle
+    th, tw = tile
+    with _quiet_subifd_warnings(), tifffile.TiffFile(str(path),
+                                                    is_ome=False) as tif:
+        # Address pages, not series. Mid-write tifffile groups pages by shape,
+        # so two same-sized images collapse into one series and series[i] means
+        # nothing. The page chain is unambiguous: a C-channel image occupies C
+        # consecutive top-level pages, each carrying its own SubIFD levels.
+        for channel in range(nchannels):
+            page = tif.pages[page0 + channel]
+            if level:
+                page = page.pages[level - 1]
+            store = zarr.open(page.aszarr(), mode='r')
+            array = store['0'] if isinstance(store, zarr.Group) else store
+            axes = 'YXS' if array.ndim == 3 else 'YX'
+            source = _ReadbackLevel(array, axes)
+            for block in iter_rechunked(source, (2 * th, 2 * tw), axes=axes,
+                                        warn=False):
+                factors = (2, 2) + (1,) * (block.ndim - 2)
+                yield block_reduce(block, factors, downsample)
+
+
+@contextlib.contextmanager
+def _quiet_subifd_warnings():
+    """Silence tifffile's "invalid SubIFDs" note while levels are unfilled.
+
+    Reading a file whose SubIFD slots are allocated but not yet written is
+    exactly what this design does on purpose; the warning is correct in general
+    and noise here.
+    """
+    logger = logging.getLogger('tifffile')
+    previous = logger.level
+    logger.setLevel(logging.ERROR)
+    try:
+        yield
+    finally:
+        logger.setLevel(previous)
+
+
+def _pages_per_image(shape, axes):
+    """Top-level TIFF pages one OME image occupies (one per channel plane)."""
+    total = 1
+    for size, code in zip(shape, axes):
+        if code not in 'YX' and not (code == 'S' and axes.endswith('S')):
+            total *= int(size)
+    return total
 
 
 def _out_shape(level, nmembers):
@@ -453,7 +627,8 @@ def _source_tile(level):
 # --------------------------------------------------------------------------
 
 def convert(src, dst, *, series=0, levels=None, tile=None,
-            compression='zstd', max_mem=DEFAULT_MAX_MEM, **kwargs):
+            compression='zstd', max_mem=DEFAULT_MAX_MEM, pyramid=True,
+            downsample='mean', **kwargs):
     """Convert a slide file to a pyramidal, calibrated OME-TIFF.
 
     The whole point of the exercise::
@@ -478,7 +653,7 @@ def convert(src, dst, *, series=0, levels=None, tile=None,
         return write_ome_tiff(target, dst, levels=levels, tile=tile,
                               compression=compression, source=src,
                               reader=type(slide).__name__, max_mem=max_mem,
-                              **kwargs)
+                              pyramid=pyramid, downsample=downsample, **kwargs)
     finally:
         slide.close()
 

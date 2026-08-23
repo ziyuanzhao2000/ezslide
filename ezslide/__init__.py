@@ -20,7 +20,11 @@ The package is layered, bottom up:
 :mod:`ezslide.writers`
     The way back out. ``convert(src, dst)`` streams any slide ezslide reads
     into a pyramidal OME-TIFF that keeps the calibration and metadata the
-    reader recovered.
+    reader recovered, generating pyramid levels for a flat input.
+:mod:`ezslide.cli`
+    The ``ezslide`` command. Composition only — merging files into channels,
+    splitting RGB, mask downsampling — built on the writer's duck-typed
+    protocol rather than on anything the library had to grow.
 
 Each tier depends only on the ones above it in that list. Adding a format means
 a module in ``formats`` that subclasses ``TiffFile`` and overrides ``_open()``,
