@@ -71,8 +71,8 @@ import zarr
 
 from ..array.rechunk import DEFAULT_MAX_MEM, iter_rechunked, plan_rechunk
 from ..array.reduce import block_reduce
+from ..formats.open import channel_groups, open_slide
 from ..formats.tiff import TiffFile, TiffLevel, TiffSeries, infer_axes
-from ..formats.vsi import VsiFile
 
 __all__ = ['write_ome_tiff', 'convert', 'OME_NAMESPACE', 'PROVENANCE_NAMESPACE']
 
@@ -224,33 +224,18 @@ def _resolution(level, md):
 # grouping
 # --------------------------------------------------------------------------
 
-def _channel_groups(series_list):
-    """Group series that are channels of one image, preserving order.
-
-    A series opts in by returning a non-None ``channel_group_key``; formats
-    that do not split channels across series return None and are written one
-    image each. The writer therefore never has to know what a ``.vsi`` is.
-    """
-    groups, index = [], {}
-    for series in series_list:
-        key = getattr(series, 'channel_group_key', None)
-        if key is None:
-            groups.append([series])
-            continue
-        if key in index:
-            groups[index[key]].append(series)
-        else:
-            index[key] = len(groups)
-            groups.append([series])
-    return groups
+#: Group series that are channels of one image. A series opts in by returning a
+#: non-None ``channel_group_key``; formats that do not split channels across
+#: series return None and are written one image each. The writer therefore never
+#: has to know what a ``.vsi`` is.
+_channel_groups = channel_groups
 
 
 def _group_channel_names(group):
     """Channel names for one merged image, or None to let OME decide."""
     if len(group) > 1:
         return [str(getattr(s, 'channel', None) or s.name) for s in group]
-    names = getattr(group[0], 'channel_names', None) or \
-        group[0].levels[0].metadata.get('ChannelNames')
+    names = getattr(group[0], 'channel_names', None)
     samples = _samples(group[0].levels[0])
     if names and len(names) == 1 and samples == 1:
         return [str(names[0])]
@@ -647,7 +632,7 @@ def convert(src, dst, *, series=0, levels=None, tile=None,
         As for :func:`write_ome_tiff`.
     """
     src = Path(src)
-    slide = _open(src)
+    slide = open_slide(src)
     try:
         target = slide if series == 'all' else _with_siblings(slide, series)
         return write_ome_tiff(target, dst, levels=levels, tile=tile,
@@ -666,16 +651,9 @@ def _with_siblings(slide, series):
     whole channel group.
     """
     chosen = slide[series]
-    key = getattr(chosen, 'channel_group_key', None)
-    if key is None:
+    if getattr(chosen, 'channel_group_key', None) is None:
         return chosen
-    return [s for s in slide.series
-            if getattr(s, 'channel_group_key', None) == key]
-
-
-def _open(path):
-    """Open with the format class that matches the suffix."""
-    suffix = Path(path).suffix.lower()
-    if suffix in ('.vsi', '.ets'):
-        return VsiFile(path)
-    return TiffFile(path)
+    for group in channel_groups(slide):
+        if any(s is chosen for s in group):
+            return group
+    return chosen

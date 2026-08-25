@@ -53,8 +53,10 @@ Example
 from __future__ import annotations
 
 import math
+import shutil
 import tempfile
 import threading
+import weakref
 from itertools import product
 
 import numpy as np
@@ -67,16 +69,21 @@ __all__ = ["LazyLevel", "CachedLevel", "lazy_pyramid", "make_store"]
 def _normalize(key, shape):
     """Turn a numpy-style index into a plain bounding box.
 
-    Returns ``(spans, drop)`` where ``spans`` is one ``(start, stop)`` pair per
-    axis of ``shape``, and ``drop`` lists the axes that were indexed with a
-    scalar and must be squeezed out of the result afterwards.
+    Returns ``(spans, drop, steps)`` where ``spans`` is one ``(start, stop)``
+    pair per axis of ``shape``, ``steps`` the stride to apply to each axis
+    afterwards, and ``drop`` the axes that were indexed with a scalar and must
+    be squeezed out of the result.
 
-    Handles integers (including negative), slices, ``Ellipsis``, and implicit
-    trailing axes. Deliberately does *not* handle:
+    Handles integers (including negative), slices with a positive step,
+    ``Ellipsis``, and implicit trailing axes. A strided slice is served by
+    computing the contiguous span it spans and striding the result, so
+    ``level[::4]`` agrees with numpy — at the cost of reducing the whole span.
+    Subsampling a level is therefore correct but not cheap; it is what a viewer
+    does to estimate contrast limits, which is why it has to work at all.
 
-    * strided slices — ``level[::4]`` would silently return every 4th element
-      of the reduced grid, which is a different array from what most callers
-      mean by striding a pyramid level. Slice first, stride the result.
+    Deliberately does *not* handle:
+
+    * negative-step slices — reverse the result instead.
     * fancy/boolean indexing and ``None`` — a lazy level maps a contiguous
       output box to a contiguous input box, and neither of those does.
 
@@ -85,7 +92,7 @@ def _normalize(key, shape):
     IndexError
         Scalar index outside the axis.
     NotImplementedError
-        Slice with a step other than 1 or None.
+        Slice with a negative step.
     TypeError
         Any other index type.
     """
@@ -95,21 +102,25 @@ def _normalize(key, shape):
         i = key.index(Ellipsis)
         key = key[:i] + (slice(None),) * (len(shape) - len(key) + 1) + key[i + 1:]
     key = key + (slice(None),) * (len(shape) - len(key))
-    spans, drop = [], []
+    spans, drop, steps = [], [], []
     for ax, (k, s) in enumerate(zip(key, shape)):
         if isinstance(k, (int, np.integer)):
             k = int(k) + (s if k < 0 else 0)
             if not 0 <= k < s:
                 raise IndexError(f"index {k} out of range for axis {ax} of size {s}")
             spans.append((k, k + 1))
+            steps.append(1)
             drop.append(ax)
         elif isinstance(k, slice):
-            if k.step not in (None, 1):
-                raise NotImplementedError("strided slices not supported; slice then stride")
-            spans.append(k.indices(s)[:2])
+            start, stop, step = k.indices(s)
+            if step < 1:
+                raise NotImplementedError(
+                    "negative-step slices not supported; slice then reverse")
+            spans.append((start, max(start, stop)))
+            steps.append(step)
         else:
             raise TypeError(f"unsupported index {type(k)} on axis {ax}")
-    return spans, drop
+    return spans, drop, steps
 
 
 class LazyLevel:
@@ -203,26 +214,33 @@ class LazyLevel:
     def __getitem__(self, key):
         """Read a region, computing it on the spot.
 
-        Accepts integers, contiguous slices, ``Ellipsis`` and implicit trailing
-        axes; see ``_normalize`` for what is rejected and why. Scalar-indexed
-        axes are squeezed out, matching numpy. Always returns a real
-        ``np.ndarray`` — there is no lazy result type, so ``level[...]`` on a
-        big level will try to materialize the whole thing.
+        Accepts integers, slices with a positive step, ``Ellipsis`` and
+        implicit trailing axes; see ``_normalize`` for what is rejected and
+        why. A stride is applied after the region is computed, so it costs the
+        whole span it crosses. Scalar-indexed axes are squeezed out, matching
+        numpy. Always returns a real ``np.ndarray`` — there is no lazy result
+        type, so ``level[...]`` on a big level will try to materialize the
+        whole thing.
         """
-        spans, drop = _normalize(key, self.shape)
+        spans, drop, steps = _normalize(key, self.shape)
         out = self._compute(spans)
+        if any(step != 1 for step in steps):
+            out = out[tuple(slice(None, None, step) for step in steps)]
         if drop:
             out = out[tuple(0 if ax in drop else slice(None) for ax in range(self.ndim))]
         return out
 
-    def __array__(self, dtype=None):
+    def __array__(self, dtype=None, copy=None):
         """Materialize the entire level as a numpy array.
 
         Makes ``np.asarray(level)`` and implicit coercion work. This reads the
         whole of ``base`` — check ``.nbytes`` first on anything large.
+
+        Every read already produces a fresh array, so ``copy=False`` — NumPy 2's
+        "never copy" request — is always satisfiable here.
         """
         a = self[...]
-        return a.astype(dtype) if dtype else a
+        return a.astype(dtype, copy=False) if dtype is not None else a
 
     def __repr__(self):
         return (f"<LazyLevel level={self.level} shape={self.shape} "
@@ -362,14 +380,15 @@ def make_store(kind="memory", path=None):
         ``'memory'``   a ``MemoryStore``. Fastest, but the cache is bounded by
                        RAM and dies with the process. Good for deep levels,
                        which are tiny.
-        ``'tmp'``      a ``LocalStore`` over a fresh ``mkdtemp`` directory.
-                       The right choice when levels are too big for RAM but you
-                       do not want them written into the real dataset. Nothing
-                       cleans this directory up — see Notes.
+        ``'tmp'``      a ``LocalStore`` over a fresh ``mkdtemp`` directory,
+                       removed when the store is collected. The right choice
+                       when levels are too big for RAM but you do not want them
+                       written into the real dataset.
         anything else  treated as a filesystem path you own and manage.
     path : str, optional
         Only used with ``kind='tmp'``, to point the tempdir somewhere specific
-        (a fast local SSD rather than a network mount, say).
+        (a fast local SSD rather than a network mount, say). A directory you
+        named is yours; only one ``make_store`` created is cleaned up.
 
     Returns
     -------
@@ -377,17 +396,24 @@ def make_store(kind="memory", path=None):
 
     Notes
     -----
-    ``'tmp'`` uses ``mkdtemp``, not ``TemporaryDirectory``, so the directory
-    outlives the process and is not removed on exit. That is deliberate — a
-    cache that survives a crashed session is often what you want — but it means
-    you are responsible for deleting it. The prefix is ``zpyr-`` to make the
+    A ``'tmp'`` store holds a :func:`weakref.finalize` that deletes its
+    directory once nothing references the store — which for a pyramid means
+    once the last ``CachedLevel`` sharing it is gone. Opening a slide per view
+    would otherwise leave a ``zpyr-`` directory behind every time, each holding
+    a quarter of the slide. The finalizer also runs at interpreter exit; a
+    hard crash still leaves the directory, and the ``zpyr-`` prefix makes those
     leftovers identifiable.
     """
     import zarr.storage as zs
     if kind == "memory":
         return zs.MemoryStore()
     if kind == "tmp":
-        return zs.LocalStore(path or tempfile.mkdtemp(prefix="zpyr-"))
+        if path is not None:
+            return zs.LocalStore(path)
+        root = tempfile.mkdtemp(prefix="zpyr-")
+        store = zs.LocalStore(root)
+        weakref.finalize(store, shutil.rmtree, root, True)
+        return store
     return zs.LocalStore(kind)
 
 

@@ -179,19 +179,20 @@ class ZarrSlideReader(ReaderBase):
         raise KeyError(f"Series {key} not found in {self.file}")
     
     def _build_properties(self):
+        # Geometry and calibration come off the series, so the reader and a
+        # caller holding the series directly cannot disagree about either.
         s = self.series
-        shapes = [(lv.height, lv.width) for lv in s.levels]
+        shapes = s.level_shapes
         h0, w0 = shapes[0]
-        md = s.levels[0].metadata
-        mpp = md.get("PhysicalSizeX")
+        pixel_size = s.pixel_size
         return SlideProperties(
             shape=(h0, w0),
             n_level=len(shapes),
             level_shape=shapes,
-            level_downsample=[h0 / h for h, _ in shapes],
-            mpp=float(mpp) if mpp is not None else None,
+            level_downsample=s.downsamples,
+            mpp=pixel_size[1] if pixel_size else None,
             bounds=(0, 0, w0, h0),
-            raw={str(k): str(v) for k, v in md.items()},
+            raw={str(k): str(v) for k, v in s.levels[0].metadata.items()},
         )
 
     def get_region(self, x, y, width, height, level=0, **kwargs):

@@ -33,15 +33,19 @@ plus a module in ``readers`` that subclasses ``ZarrSlideReader`` and names it.
 
 from . import readers, writers           # importing readers registers them
 from .readers import ZarrSlideReader, pyramid_options
+from .array.channel import ChannelView
 from .array.tensorstore_array import (TensorStoreArray, as_tensorstore,
                                       tensorstore_context)
 from .formats.tiff import TiffFile
 from .formats.vsi import VsiFile, VsiSeries, open_vsi
+from .formats.open import channel_groups, open_slide
 from .array.rechunk import RechunkPlan, iter_rechunked, plan_rechunk
 from .writers import convert, write_ome_tiff
 
 __all__ = ["readers", "writers", "ZarrSlideReader", "pyramid_options",
            "TensorStoreArray", "as_tensorstore", "tensorstore_context",
+           "ChannelView",
            "TiffFile", "VsiFile", "VsiSeries", "open_vsi",
+           "open_slide", "channel_groups",
            "convert", "write_ome_tiff",
            "plan_rechunk", "iter_rechunked", "RechunkPlan"]

@@ -2,10 +2,11 @@ import zarr
 import dask.array as da
 import numpy as np
 import tifffile
+import re
+from math import log
 from PIL import Image
-from ..array.cache import make_cache_store
-from ..array.pyramid import lazy_pyramid
-from ..array.tensorstore_array import TensorStoreArray, as_tensorstore
+from .global_chunk_cache import make_cache_store
+from .lazy_pyramid import lazy_pyramid
 
 
 tag_registries = [tifffile.TIFF.TAGS,
@@ -76,88 +77,6 @@ def recover_mpp(level):
 def TIFFParser(level):
     return recover_mpp(level)
 
-
-#: Namespaces of the MapAnnotations ``ezslide.writers.ome_tiff`` emits. Kept
-#: here as literals rather than imported, so the read path does not drag in the
-#: writer.
-_EZSLIDE_NAMESPACES = ('ezslide:metadata', 'ezslide:provenance')
-
-
-def recover_ome_annotations(tifffile_obj, image_index=0):
-    """Metadata recovered from an OME-TIFF's XML, for one image in the file.
-
-    Two things come back that ``tifffile`` will not hand over on its own:
-
-    * ``ChannelNames``, read from the OME ``Channel`` elements. True of any
-      OME-TIFF, not only ones ezslide wrote.
-    * whatever ``ezslide.writers.ome_tiff`` stored in its ``MapAnnotation`` —
-      objective, magnification, source path, original codec. ``tifffile``
-      writes these happily but only parses ``modulo`` annotations back, so a
-      converted slide would otherwise return with its calibration and none of
-      its provenance. Closing that loop is the reason the writer records them.
-
-    Results are keyed per image, since one file may hold several.
-    """
-    if tifffile_obj is None:
-        return {}
-    # Parsed once per file, not once per level: a cellSens dataset can hold
-    # fifty series of nine levels each, and the XML does not change.
-    cached = getattr(tifffile_obj, '_ezslide_annotations', None)
-    if cached is None:
-        cached = _parse_ome_annotations(tifffile_obj)
-        try:
-            tifffile_obj._ezslide_annotations = cached
-        except AttributeError:
-            pass
-    if not cached:
-        return {}
-    return cached[image_index] if image_index < len(cached) else {}
-
-
-def _parse_ome_annotations(tifffile_obj):
-    """``[{...}, ...]`` — recovered metadata per OME Image, in document order."""
-    xml = getattr(tifffile_obj, 'ome_metadata', None)
-    if not xml:
-        return []
-    from xml.etree import ElementTree
-
-    try:
-        root = ElementTree.fromstring(xml)
-    except ElementTree.ParseError:
-        return []
-
-    # Annotations live once at the root and are referenced by ID from each
-    # image, so resolve them before walking the images.
-    by_id = {}
-    for element in root.iter():
-        if not element.tag.endswith('MapAnnotation'):
-            continue
-        if element.get('Namespace') not in _EZSLIDE_NAMESPACES:
-            continue
-        entries = {}
-        for value in element:
-            for entry in value:
-                key = entry.get('K')
-                if key:
-                    entries[key] = entry.text
-        by_id[element.get('ID')] = entries
-
-    images = []
-    for image in root.iter():
-        if not image.tag.endswith('}Image'):
-            continue
-        recovered = {}
-        for ref in image.iter():
-            if ref.tag.endswith('AnnotationRef'):
-                recovered.update(by_id.get(ref.get('ID'), {}))
-        names = [c.get('Name') for c in image.iter()
-                 if c.tag.endswith('}Channel') and c.get('Name')]
-        if names:
-            recovered['ChannelNames'] = names
-        images.append(recovered)
-    return images
-
-
 def NDPIParser(metadata):
     return metadata
 
@@ -194,10 +113,8 @@ def iter_tiles(array, axes, tile_size=None):
 
     Parameters
     ----------
-    array : array-like
-        The array to iterate over — a zarr array, a ``TensorStoreArray``, or
-        a lazy pyramid level. Each tile comes back in whatever the array
-        returns from ``__getitem__``, so a lazy array yields lazy views.
+    array : zarr array
+        The array to iterate over.
     axes : str
         Axes string for the array, must contain 'Y' and 'X'.
     tile_size : (height, width), optional
@@ -233,10 +150,7 @@ class TiffPage:
 
         base_store = self._page.aszarr()
         cached_store = make_cache_store(base_store)
-        self._zarr = zarr.open(cached_store)
-        # Lazy by default: indexing composes a tensorstore view and decodes
-        # nothing. eagerfy() restores zarr's materialize-on-index behaviour.
-        self.data = as_tensorstore(self._zarr)
+        self.data = zarr.open(cached_store)
         self.delayed_data = da.from_zarr(cached_store)
         self._store = cached_store
 
@@ -259,16 +173,6 @@ class TiffPage:
     def __setitem__(self, key, value):
         self.data[key] = value
 
-    def eagerfy(self):
-        """Return numpy from ``page[sel]`` from now on. Returns ``self``."""
-        self.data.eagerfy()
-        return self
-
-    def lazify(self):
-        """Return lazy tensorstore views from ``page[sel]`` again."""
-        self.data.lazify()
-        return self
-
     def tiles(self, tile_size=None):
         return iter_tiles(self.data, self.axes, tile_size)
 
@@ -286,8 +190,7 @@ class TiffLevel():
             self.delayed_data = da.from_zarr(cached_store, component='0')
         else:
             self.delayed_data = da.from_zarr(cached_store)
-        self._zarr = initial_array
-        self.data = as_tensorstore(initial_array)
+        self.data = initial_array
         self._store = cached_store
         self._metadata = dict([
             (get_tag_name(tag.code), tag.value) for tag in self._level.pages[0].tags
@@ -350,59 +253,17 @@ class TiffLevel():
     def __setitem__(self, key, value):
         self.data[key] = value
 
-    def eagerfy(self):
-        """Materialize on index, for this level and each of its pages.
-
-        A ``LazyTiffLevel`` has neither a tensorstore nor pages — its data is
-        a computed view that already returns numpy — so this is a no-op there
-        and the cascade from a series stays uniform.
-        """
-        for arr in (self.data, *self._pages):
-            if hasattr(arr, 'eagerfy'):
-                arr.eagerfy()
-        return self
-
-    def lazify(self):
-        """Undo ``eagerfy``, for this level and each of its pages."""
-        for arr in (self.data, *self._pages):
-            if hasattr(arr, 'lazify'):
-                arr.lazify()
-        return self
-
     def tiles(self, tile_size=None):
         return iter_tiles(self.data, self.axes, tile_size)
 
     def parse_metadata(self, kind):
         metadata = {}
-        # Annotations first: a slide ezslide converted carries its objective,
-        # magnification and provenance here, and anything the TIFF tags say
-        # about this file should win over what they say about its ancestor.
-        metadata.update(recover_ome_annotations(self._parent_tifffile(),
-                                                self._image_index()))
         metadata.update(TIFFParser(self._level))
         if kind == 'ndpi':
             parser = NDPIParser
         else:
             parser = lambda x: x
         self._parsed_metadata = parser(metadata)
-
-    def _parent_tifffile(self):
-        """The ``tifffile.TiffFile`` this level came out of, if reachable."""
-        try:
-            return self._level.pages[0].parent
-        except (AttributeError, IndexError):
-            return None
-
-    def _image_index(self):
-        """Position of this level's series in the file, for per-image metadata."""
-        tif = self._parent_tifffile()
-        if tif is None:
-            return 0
-        for i, series in enumerate(getattr(tif, 'series', ())):
-            if self._level is series or any(self._level is lv
-                                            for lv in series.levels):
-                return i
-        return 0
 
 class LazyTiffLevel(TiffLevel):
     """A pyramid level that is not in the file — computed from the level above.
@@ -506,12 +367,7 @@ class TiffSeries():
         """
         base = self._levels[0]
         axes = infer_axes(base.data, getattr(base, 'axes', None))
-        # ``block_reduce`` reshapes and pads real numpy blocks, so the pyramid
-        # gets an eager handle on level 0 — a separate wrapper, so whichever
-        # mode a caller has put ``base.data`` in is left alone.
-        source = base.data.eager_view() if isinstance(base.data, TensorStoreArray) \
-            else base.data
-        stack = lazy_pyramid(source, levels=levels,
+        stack = lazy_pyramid(base.data, levels=levels,
                              factors=pyramid_factors(axes, factor), how=how,
                              cache=cache, store=store,
                              materialize_below=materialize_below,
@@ -540,21 +396,7 @@ class TiffSeries():
     @property
     def levels(self):
         return self._levels
-
-    @property
-    def channel_group_key(self):
-        """Key shared by series that are channels of one multi-channel image.
-
-        ``None`` — the default and the answer for any format that puts a whole
-        image in one series — means "write me as my own image". A format whose
-        reader splits channels across series (see ``VsiSeries``) returns a key
-        identifying the parent image, and the OME writer merges the group into
-        a single ``CYX`` image with per-channel names. Keeping the key here
-        rather than in the writer is what lets the writer stay ignorant of any
-        particular file format.
-        """
-        return None
-
+    
     @property
     def name(self):
         if hasattr(self._series, 'name'):
@@ -569,7 +411,7 @@ class TiffSeries():
     
     @property
     def thumbnail(self):
-        img = np.asarray(self._levels[-1].data[:])
+        img = self._levels[-1].data[:]
         if len(self.axes) == 2:
             return Image.fromarray(img) # MINISBLACK
         elif len(self.axes) == 3:
@@ -584,68 +426,6 @@ class TiffSeries():
             return self._levels[0].data
         else:
             return [level.data for level in self._levels]
-
-    def multiscale(self, eager=True):
-        """Every level's array as a list, one entry per level.
-
-        The difference from :attr:`data` is that this is *always* a list, even
-        for a single-level series, so a consumer that walks a pyramid does not
-        have to branch on how many levels the file turned out to have.
-
-        ``eager=True`` also flips the series to materialize on index, which is
-        the contract a viewer's chunk loader expects: it asks for a region and
-        wants an ndarray back. It costs nothing up front — the levels still
-        read only the region indexed.
-
-        .. code-block:: python
-
-            >>> levels = series.multiscale()
-            >>> viewer.add_image(levels, multiscale=len(levels) > 1)
-        """
-        if eager:
-            self.eagerfy()
-        return [level.data for level in self._levels]
-
-    @property
-    def channel_names(self):
-        """Names the file records for its channels, or ``None``.
-
-        Recovered from the OME ``Channel`` elements of any OME-TIFF, including
-        the ones ezslide's own writer produces, so a converted slide keeps the
-        marker names it was written with. ``VsiSeries`` overrides this with the
-        names from the cellSens tag tree.
-        """
-        names = self._levels[0].metadata.get('ChannelNames')
-        return [str(name) for name in names] if names else None
-
-    @property
-    def pixel_size(self):
-        """``(y, x)`` micrometres per pixel at level 0, or ``None``.
-
-        Broader than ``tifffile``'s ``.mpp``, which reads the TIFF resolution
-        tags only: this is whatever the format's parser recovered, so OME XML
-        and the cellSens tag tree answer here too.
-        """
-        md = self._levels[0].metadata
-        y, x = md.get('PhysicalSizeY'), md.get('PhysicalSizeX')
-        if y is None or x is None:
-            return None
-        try:
-            return float(y), float(x)
-        except (TypeError, ValueError):
-            return None
-
-    @property
-    def level_shapes(self):
-        """``[(height, width), ...]`` per level, whatever axis order is used."""
-        return [(level.height, level.width) for level in self._levels]
-
-    @property
-    def downsamples(self):
-        """Each level's linear shrink factor relative to level 0."""
-        base = self._levels[0].height
-        return [base / level.height for level in self._levels]
-
     def __repr__(self):
         lines = [
                 f'Image {self.name!r}' if self.name else 'Image' + f'of type {self.kind}',
@@ -673,18 +453,6 @@ class TiffSeries():
         else:
             self.levels[key[0]][key[1:]] = value
 
-    def eagerfy(self):
-        """Make every level of this series materialize on index."""
-        for level in self._levels:
-            level.eagerfy()
-        return self
-
-    def lazify(self):
-        """Make every level of this series return lazy views again."""
-        for level in self._levels:
-            level.lazify()
-        return self
-
     def parse_metadata(self, kind):
         for level in self._levels:
             level.parse_metadata(kind)
@@ -706,31 +474,19 @@ class TiffFile():
             ``{'how': 'mode', 'materialize_below': 3}``.
         """
         self._file = file
-        self._tifffile = None
-        self._series = self._open(file, *args, pyramidalize=pyramidalize,
-                                  pyramid=pyramid, **kwargs)
-        self._kind = kind if kind else self.series[0].kind
+        self._tifffile = tifffile.TiffFile(file, *args, **kwargs)
+        self._zarr_store = tifffile.imread(file, *args, **kwargs, aszarr=True)
+        self._series = [TiffSeries(series, pyramidalize=pyramidalize,
+                                   pyramid=pyramid)
+                        for series in self._tifffile.series]
+        self._kind = kind if kind else self.series[0].kind 
 
         try:
             for series in self._series:
                 series.parse_metadata(self._kind)
         except Exception as e:
             print(f"Warning: could not parse metadata due to {e}")
-
-    def _open(self, file, *args, pyramidalize=False, pyramid=None, **kwargs):
-        """Open the container and return its series as ezslide ``TiffSeries``.
-
-        The single place that assumes the file is a TIFF. A subclass that
-        reads a container ``tifffile`` cannot open by itself overrides this —
-        see ``formats.vsi.VsiFile`` — and is responsible for setting
-        ``self._tifffile`` to whatever should answer the attribute lookups
-        that fall through ``__getattr__`` (``None`` if nothing should).
-        """
-        self._tifffile = tifffile.TiffFile(file, *args, **kwargs)
-        self._zarr_store = tifffile.imread(file, *args, **kwargs, aszarr=True)
-        return [TiffSeries(series, pyramidalize=pyramidalize, pyramid=pyramid)
-                for series in self._tifffile.series]
-
+            
     @property
     def series(self):
         return self._series
@@ -747,13 +503,7 @@ class TiffFile():
             return [series.data for series in self._series]
         
     def __getattr__(self, name):
-        # __dict__ rather than self._tifffile: an override of _open that fails
-        # part-way, or a container with no TIFF behind it, would otherwise send
-        # every missing attribute into infinite recursion.
-        backing = self.__dict__.get('_tifffile')
-        if backing is None:
-            raise AttributeError(name)
-        return getattr(backing, name)
+        return getattr(self._tifffile, name)
 
     def __repr__(self):
         lines = [f'TiffFile ({self.kind}) from {self._file} with {len(self.series)} image series: ']
@@ -778,40 +528,100 @@ class TiffFile():
                     self._series[id] = value
                     break
     
-    def eagerfy(self):
-        """Make every series in the file materialize on index.
-
-        The escape hatch for code that wants zarr's old contract back —
-        ``PIL``, ``np.pad``, anything that types its input as ``ndarray``:
-
-            >>> slide = TiffFile(path).eagerfy()
-            >>> slide[0].levels[0][0:512, 0:512]   # np.ndarray, read now
-        """
-        for series in self._series:
-            series.eagerfy()
-        return self
-
-    def lazify(self):
-        """Make every series in the file return lazy views again."""
-        for series in self._series:
-            series.lazify()
-        return self
-
     def __enter__(self):
         return self
     
     def __exit__(self, *args):
         self.close()
         
-    def to_ome_tiff(self, path, **kwargs):
-        """Write this slide out as a pyramidal, calibrated OME-TIFF.
-
-        Thin sugar over :func:`ezslide.write_ome_tiff`; imported lazily so the
-        read path never pulls in the writer.
-        """
-        from ..writers.ome_tiff import write_ome_tiff
-        return write_ome_tiff(self, path, source=self._file, **kwargs)
-
     def close(self):
-        if self._tifffile is not None:
-            self._tifffile.close()
+        self._tifffile.close()
+
+def remove_invalid_xml_chars(text):
+    xml_compliant_text = re.sub(r'[^\x09\x0A\x0D\x20-\uD7FF\uE000-\uFFFD\U00010000-\U0010FFFF]+', '', text)
+    return xml_compliant_text
+
+class TiffWriter(tifffile.TiffWriter):
+    def __init__(self, file, *args, **kwargs):
+        self.file = file
+        super().__init__(file, *args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._tifffile, name)
+    
+    def write(self, 
+            tiff_obj, 
+            metadata={},
+            write_tiles=True, 
+            *args, **kwargs):
+        
+        if isinstance(tiff_obj, TiffLevel):
+            level = tiff_obj
+            serialized = dict([(remove_invalid_xml_chars(str(key)), 
+                                remove_invalid_xml_chars(str(val))) for key, val in level.metadata.items()])
+            metadata.update(serialized)
+            metadata.update({'MapAnnotation': serialized,})
+            tile_size = kwargs.get("tile", None)
+            if tile_size is None:
+                min_size = min(level.width, level.height)
+                if min_size > 1024:
+                    tile_size = (1024, 1024)
+                else:
+                    s = 2**(int(log(min_size, 2)))
+                    tile_size = (s, s)
+            print(tile_size)
+            kwargs['tile']=tile_size
+            shape = level.data.shape
+            if write_tiles:
+                data = level.tiles(tile_size)
+                if level.axes == 'YXS':
+                    shape = tuple([shape[i] for i  in [2, 0, 1]])
+            else:
+                data = level.data[:]
+            if level.level_id == 0: # base level
+                metadata.update({'Name': level.name})
+            if not 'photometric' in kwargs:
+                if isinstance(level.metadata['BitsPerSample'], int):
+                    photometric = 'MINISBLACK'
+                elif isinstance(level.metadata['BitsPerSample'], tuple):
+                    if len(level.metadata['BitsPerSample']) == 3:
+                        photometric = 'RGB'
+                    else:
+                        photometric = 'MINISBLACK'
+                kwargs['photometric'] = photometric
+            super().write(data, 
+                        metadata=metadata, 
+                        shape=shape,
+                        dtype=level.data.dtype,
+                        *args, **kwargs)
+        elif isinstance(tiff_obj, TiffSeries):
+            series = tiff_obj
+            subresolutions = len(series.levels) - 1
+            if subresolutions == 0:
+                self.write(series.levels[0], 
+                        metadata=metadata, 
+                        write_tiles=write_tiles,
+                        *args,
+                        **kwargs)
+            else:
+                self.write(series.levels[0], 
+                        metadata=metadata, 
+                        write_tiles=write_tiles,
+                        subifds=subresolutions,
+                        *args,
+                        **kwargs)
+                for level in series.levels[1:]:
+                    self.write(level, 
+                        metadata=metadata, 
+                        write_tiles=write_tiles,
+                        subfiletype=1,
+                        *args,
+                        **kwargs)
+        elif isinstance(tiff_obj, TiffFile):
+            file = tiff_obj
+            for series in file.series:
+                self.write(series, 
+                           metadata=metadata,
+                           write_tiles=write_tiles,
+                           *args,
+                           **kwargs)

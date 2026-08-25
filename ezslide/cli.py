@@ -10,12 +10,14 @@ and where to stop.
 That separation is possible because the writer is duck-typed (see
 :mod:`ezslide.writers.ome_tiff`). Merging separate files into one
 multi-channel image and splitting an RGB image into three channels are both
-done here with small adapter classes; the writer learns nothing about either.
+done here with small adapter classes over :class:`ezslide.ChannelView`; the
+writer learns nothing about either.
 
     ezslide convert slide.vsi slide.ome.tif
     ezslide convert DAPI.tif CY5.tif out.ome.tif --channel-names DAPI CY5
     ezslide convert he.tif out.ome.tif --split-rgb --tile-size 1024
     ezslide convert labels.tif out.ome.tif --mask
+    ezslide convert stack.tif out.ome.tif --downsample max
 """
 
 from __future__ import annotations
@@ -27,18 +29,17 @@ from pathlib import Path
 
 import numpy as np
 
+from .array.channel import ChannelView
 from .array.rechunk import DEFAULT_MAX_MEM
-from .formats.tiff import TiffFile, infer_axes
-from .formats.vsi import VsiFile
+from .formats.open import open_slide
+from .formats.tiff import infer_axes
 from .writers.ome_tiff import write_ome_tiff
 
 __all__ = ['main', 'convert_command']
 
-_VSI_SUFFIXES = ('.vsi', '.ets')
-
 
 # --------------------------------------------------------------------------
-# adapters — the whole reason the library needs no new features
+# adapters — command-line policy, built on library mechanism
 # --------------------------------------------------------------------------
 
 class _SampleView:
@@ -49,13 +50,18 @@ class _SampleView:
     channels. Slicing the sample axis off turns each into an ordinary
     single-channel plane. The same idea as ``pyramid_assemble.py``'s
     ``SampleSplitter``, expressed as a level rather than a raw array.
+
+    The slicing itself is :class:`ezslide.ChannelView`, which defers the sample
+    index into each tile read so that a level in the file and a level ezslide
+    derived by pyramidalizing cost the same to read from.
     """
 
     def __init__(self, level, sample):
         self._level = level          # NOTE: a plain attribute, not a tifffile
         self._sample = sample        # series; the writer only duck-types it
         self.axes = 'YX'
-        self.data = _SampleArray(level.data, level, sample)
+        axes = infer_axes(level.data, getattr(level, 'axes', None))
+        self.data = ChannelView(level.data, axes, sample)
         self.metadata = dict(level.metadata)
         self.metadata.pop('ChannelNames', None)
 
@@ -65,31 +71,6 @@ class _SampleView:
 
     def __getitem__(self, key):
         return self.data[key]
-
-
-class _SampleArray:
-    """Array view of one sample; carries the shape/chunks the planner reads."""
-
-    def __init__(self, data, level, sample):
-        axes = infer_axes(data, getattr(level, 'axes', None))
-        self._data = data
-        self._sample = sample
-        self._s_ax = axes.index('S')
-        self._y, self._x = axes.index('Y'), axes.index('X')
-        self.shape = (data.shape[self._y], data.shape[self._x])
-        chunks = getattr(data, 'chunks', None)
-        self.chunks = ((chunks[self._y], chunks[self._x]) if chunks
-                       else (512, 512))
-        self.dtype = np.dtype(data.dtype)
-
-    def __getitem__(self, key):
-        if not isinstance(key, tuple):
-            key = (key,)
-        key = key + (slice(None),) * (2 - len(key))
-        full = [slice(None)] * (max(self._y, self._x, self._s_ax) + 1)
-        full[self._y], full[self._x] = key[0], key[1]
-        full[self._s_ax] = self._sample
-        return np.asarray(self._data[tuple(full)])
 
 
 class _AsChannel:
@@ -111,11 +92,6 @@ class _AsChannel:
 # --------------------------------------------------------------------------
 # input handling
 # --------------------------------------------------------------------------
-
-def _open(path):
-    return VsiFile(path) if Path(path).suffix.lower() in _VSI_SUFFIXES \
-        else TiffFile(path)
-
 
 def _pick_series(slide, spec, scene):
     """The series a path refers to, honouring a ``,N`` page suffix."""
@@ -143,7 +119,7 @@ def _collect(paths, args):
         path, page = _split_spec(path_spec)
         if not Path(path).exists():
             _die(f"input not found: {path}")
-        slide = _open(path)
+        slide = open_slide(path)
         opened.append(slide)
         chosen = _pick_series(slide, page, args.scene)
         series.append((Path(path).stem, chosen))
@@ -206,8 +182,26 @@ def _die(message):
 # the convert command
 # --------------------------------------------------------------------------
 
+DOWNSAMPLE_MODES = ('mean', 'max', 'min', 'mode')
+
+
+def _downsample_mode(args):
+    """How pyramid levels are reduced: ``--downsample``, or ``--mask``'s default.
+
+    ``--mask`` is shorthand for ``--downsample mode``; spelling both is fine
+    as long as they agree, since ``--mask`` may later mean more than the
+    reduction alone.
+    """
+    if args.downsample is None:
+        return 'mode' if args.mask else 'mean'
+    if args.mask and args.downsample != 'mode':
+        _die(f"--mask implies --downsample mode, not {args.downsample!r}")
+    return args.downsample
+
+
 def convert_command(args):
     out = Path(args.output)
+    how = _downsample_mode(args)
     if out.exists() and not args.overwrite:
         _die(f"{out} exists; pass --overwrite to replace it")
 
@@ -229,12 +223,12 @@ def convert_command(args):
     print(f"    inputs      : {len(args.inputs)} -> {len(series)} channel(s)")
     print(f"    tile        : {tile[0]}x{tile[1]}  compression={args.compression}")
     print(f"    pyramid     : {'generate' if args.pyramid else 'as-is'}"
-          f"  downsample={'mode (mask)' if args.mask else 'mean'}")
+          f"  downsample={how}{' (mask)' if args.mask else ''}")
     try:
         write_ome_tiff(
             series if len(series) > 1 else series[0], out,
             tile=tile, compression=args.compression, levels=args.levels,
-            pyramid=args.pyramid, downsample='mode' if args.mask else 'mean',
+            pyramid=args.pyramid, downsample=how,
             metadata=overrides or None, max_mem=args.max_mem,
             source=args.inputs[0], reader='ezslide-cli',
         )
@@ -272,9 +266,14 @@ def _build_parser():
                    help='cap the pyramid depth')
     c.add_argument('--no-pyramid', dest='pyramid', action='store_false',
                    help='write only the levels the input already has')
+    c.add_argument('--downsample', choices=DOWNSAMPLE_MODES, default=None,
+                   metavar='MODE',
+                   help='how pyramid levels are aggregated: %(choices)s '
+                        '(default mean, or mode with --mask)')
     c.add_argument('--mask', action='store_true',
-                   help='label/mask image: downsample by nearest neighbour so '
-                        'labels are never averaged into values that do not exist')
+                   help='label/mask image: shorthand for --downsample mode, '
+                        'so labels are never averaged into values that do not '
+                        'exist')
     c.add_argument('--split-rgb', action='store_true',
                    help='split interleaved RGB into three separate channels')
     c.add_argument('--channel-names', nargs='+', metavar='NAME',
