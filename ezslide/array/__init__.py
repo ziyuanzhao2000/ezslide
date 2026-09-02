@@ -17,15 +17,18 @@ Nothing here knows what a slide is. These are the pieces the format modules in
 ``channel``
     ``ChannelView`` — one channel of a level as a ``YX`` array-like, deferring
     the channel index into the tile read so that a level in the file and a
-    level ezslide derived cost the same to read from.
+    level ezslide derived cost the same to read from. ``InterleavedView``
+    does the same for the whole channel axis, presenting a planar level as an
+    interleaved ``YXC`` one for viewers that only render RGB that way.
 ``rechunk``
     ``plan_rechunk`` / ``iter_rechunked`` — read an array on one chunk grid and
     emit it on another, each source chunk decoded once, within a stated memory
     budget. What the OME-TIFF writer uses to retile a slide.
 """
 
-from .channel import ChannelView, channel_axis_of, n_channels
+from .channel import (ChannelView, InterleavedView, channel_axis_of,
+                      n_channels)
 from .rechunk import DEFAULT_MAX_MEM, RechunkPlan, iter_rechunked, plan_rechunk
 
 __all__ = ["plan_rechunk", "iter_rechunked", "RechunkPlan", "DEFAULT_MAX_MEM",
-           "ChannelView", "channel_axis_of", "n_channels"]
+           "ChannelView", "InterleavedView", "channel_axis_of", "n_channels"]

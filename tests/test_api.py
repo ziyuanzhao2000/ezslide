@@ -1,4 +1,4 @@
-"""Tests for the format-neutral API: open_slide, multiscale, ChannelView, calibration.
+"""Tests for the format-neutral API: open_slide, multiscale, channel views, calibration.
 
 Runnable either way::
 
@@ -20,7 +20,8 @@ import tifffile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import ezslide
-from ezslide import ChannelView, channel_groups, open_slide
+from ezslide import (ChannelView, InterleavedView, channel_groups,
+                     open_slide)
 from ezslide.array.channel import channel_axis_of, n_channels
 from ezslide.formats.open import slide_class
 
@@ -207,6 +208,60 @@ def test_channel_view_array_protocol():
     assert np.array_equal(np.asarray(view), src['cycif'][0])
     assert np.array(view, copy=False).shape == (1024, 1024)     # NumPy 2
     assert np.array(view, copy=True).shape == (1024, 1024)
+    assert np.asarray(view, dtype=np.float32).dtype == np.float32
+
+
+def test_interleaved_view_is_pixel_exact_on_every_level_kind():
+    _, _, cycif, src = _fixtures()
+    levels = _pyramidal(cycif)[0].multiscale()
+    assert len(levels) > 1, 'need a synthesized level to compare against'
+    for level in levels:
+        view = InterleavedView(level, 'CYX')
+        assert view.ndim == 3
+        assert view.shape == (*level.shape[1:], level.shape[0])
+        tile = view[10:74, 20:84]
+        assert isinstance(tile, np.ndarray)
+        assert np.array_equal(
+            tile, np.moveaxis(np.asarray(level[:, 10:74, 20:84]), 0, -1))
+    # ...and the file level really does match the original pixels.
+    assert np.array_equal(InterleavedView(levels[0], 'CYX')[0:64, 0:64],
+                          np.moveaxis(src['cycif'][:, 0:64, 0:64], 0, -1))
+
+
+def test_interleaved_view_indexing_matches_numpy():
+    _, _, cycif, src = _fixtures()
+    level = open_slide(cycif)[0].multiscale()[0]
+    view, want = InterleavedView(level, 'CYX'), np.moveaxis(src['cycif'], 0, -1)
+    for key in [(slice(0, 32), slice(0, 32)), Ellipsis, 5,
+                (slice(None), 7), (3, slice(10, 20)),
+                (slice(0, 8), slice(0, 8), 2), (Ellipsis, 0)]:
+        assert np.array_equal(view[key], want[key]), key
+
+
+def test_interleaved_view_leaves_an_interleaved_level_alone():
+    """``YXS`` data is already in the layout, so the view is a passthrough."""
+    rgb = np.arange(8 * 9 * 3, dtype=np.uint8).reshape(8, 9, 3)
+    view = InterleavedView(rgb, 'YXS')
+    assert view.shape == (8, 9, 3)
+    assert np.array_equal(np.asarray(view), rgb)
+    assert np.array_equal(view[2:5, 1:4], rgb[2:5, 1:4])
+
+
+def test_interleaved_view_rejects_a_level_without_channels():
+    try:
+        InterleavedView(np.zeros((8, 9)), 'YX')
+    except ValueError:
+        return
+    raise AssertionError('expected ValueError for a level with no channel axis')
+
+
+def test_interleaved_view_array_protocol():
+    _, _, cycif, src = _fixtures()
+    level = open_slide(cycif)[0].multiscale()[0]
+    view = InterleavedView(level, 'CYX')
+    assert np.array_equal(np.asarray(view), np.moveaxis(src['cycif'], 0, -1))
+    assert np.array(view, copy=False).shape == (1024, 1024, 4)   # NumPy 2
+    assert np.array(view, copy=True).shape == (1024, 1024, 4)
     assert np.asarray(view, dtype=np.float32).dtype == np.float32
 
 
