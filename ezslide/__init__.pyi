@@ -1,17 +1,3 @@
-# Type stub and lazy-import manifest for ezslide.
-#
-# This file has two readers. Type checkers and IDEs read it statically, which
-# is how they still see the public API now that __init__.py binds no names at
-# import time. lazy_loader.attach_stub parses it with ast at runtime to build
-# the name -> module map behind the package's __getattr__. One list, both
-# consumers, no drift: a symbol added here is importable and type-visible, and
-# a symbol added only to a submodule is neither.
-#
-# lazy_loader's _StubVisitor accepts only within-package imports (ast level 1).
-# An absolute import here -- `from typing import ...` included -- raises
-# ValueError when the package is imported. The __all__ below is ignored by the
-# visitor (attach derives its own, sorted) and exists for type checkers.
-
 from . import array as array
 from . import formats as formats
 from . import readers as readers
