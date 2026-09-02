@@ -15,8 +15,11 @@
 
 Adding a format means subclassing ``TiffFile``, overriding ``_open()``, and
 naming its suffixes in ``open``.
+
+Loaded lazily: the names below are declared in ``__init__.pyi`` and resolve on
+first use, so nothing here imports tifffile until a slide class is asked for.
 """
 
-from .open import channel_groups, open_slide, slide_class
+import lazy_loader as _lazy
 
-__all__ = ["open_slide", "channel_groups", "slide_class"]
+__getattr__, __dir__, __all__ = _lazy.attach_stub(__name__, __file__)

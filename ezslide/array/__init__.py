@@ -24,11 +24,12 @@ Nothing here knows what a slide is. These are the pieces the format modules in
     ``plan_rechunk`` / ``iter_rechunked`` — read an array on one chunk grid and
     emit it on another, each source chunk decoded once, within a stated memory
     budget. What the OME-TIFF writer uses to retile a slide.
+
+Loaded lazily: the names below are declared in ``__init__.pyi`` and resolve on
+first use, so importing this package costs nothing and ``cache`` in particular
+does not drag zarr in until a store is actually opened.
 """
 
-from .channel import (ChannelView, InterleavedView, channel_axis_of,
-                      n_channels)
-from .rechunk import DEFAULT_MAX_MEM, RechunkPlan, iter_rechunked, plan_rechunk
+import lazy_loader as _lazy
 
-__all__ = ["plan_rechunk", "iter_rechunked", "RechunkPlan", "DEFAULT_MAX_MEM",
-           "ChannelView", "InterleavedView", "channel_axis_of", "n_channels"]
+__getattr__, __dir__, __all__ = _lazy.attach_stub(__name__, __file__)

@@ -67,8 +67,6 @@ from pathlib import Path
 import numpy as np
 import tifffile
 
-import zarr
-
 from ..array.rechunk import DEFAULT_MAX_MEM, iter_rechunked, plan_rechunk
 from ..array.reduce import block_reduce
 from ..formats.open import channel_groups, open_slide
@@ -507,6 +505,8 @@ def _readback_tiles(writer, path, page0, nchannels, level, tile, downsample):
     one 2x block per output tile, in raster order, decoding each chunk of the
     previous level once and respecting the memory budget.
     """
+    import zarr                        # deferred: the write path never needs it
+
     writer.filehandle.flush()          # the reader below opens its own handle
     th, tw = tile
     with _quiet_subifd_warnings(), tifffile.TiffFile(str(path),

@@ -1,11 +1,5 @@
-import zarr
-import dask.array as da
 import numpy as np
 import tifffile
-from PIL import Image
-from ..array.cache import make_cache_store
-from ..array.pyramid import lazy_pyramid
-from ..array.tensorstore_array import TensorStoreArray, as_tensorstore
 
 
 tag_registries = [tifffile.TIFF.TAGS,
@@ -229,6 +223,10 @@ def iter_tiles(array, axes, tile_size=None):
 
 class TiffPage:
     def __init__(self, tiffpage):
+        import dask.array as da            # deferred; see the module docstring
+        import zarr
+        from ..array.cache import make_cache_store
+        from ..array.tensorstore_array import as_tensorstore
         self._page = tiffpage
 
         base_store = self._page.aszarr()
@@ -274,6 +272,10 @@ class TiffPage:
 
 class TiffLevel():
     def __init__(self, tifflevel, level_id):
+        import dask.array as da            # deferred; see the module docstring
+        import zarr
+        from ..array.cache import make_cache_store
+        from ..array.tensorstore_array import as_tensorstore
         self._level = tifflevel
         self.level_id = level_id
         self._pages = [TiffPage(page) for page in tifflevel.pages]
@@ -453,6 +455,7 @@ class LazyTiffLevel(TiffLevel):
     @property
     def delayed_data(self):
         """Dask view, built on first use — only ``__repr__`` needs it."""
+        import dask.array as da
         if self._delayed is None:
             self._delayed = da.from_array(
                 self.data, chunks=self.data.chunks,
@@ -504,6 +507,8 @@ class TiffSeries():
             instant; set it to 3 or so if you will pan around the deep levels,
             accepting that construction then reads the whole slide once.
         """
+        from ..array.pyramid import lazy_pyramid
+        from ..array.tensorstore_array import TensorStoreArray
         base = self._levels[0]
         axes = infer_axes(base.data, getattr(base, 'axes', None))
         # ``block_reduce`` reshapes and pads real numpy blocks, so the pyramid
@@ -569,6 +574,7 @@ class TiffSeries():
     
     @property
     def thumbnail(self):
+        from PIL import Image
         img = np.asarray(self._levels[-1].data[:])
         if len(self.axes) == 2:
             return Image.fromarray(img) # MINISBLACK
