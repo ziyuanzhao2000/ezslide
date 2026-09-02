@@ -26,6 +26,4 @@ The package is layered, bottom up:
     splitting RGB, mask downsampling — built on the writer's duck-typed
     protocol rather than on anything the library had to grow.
 
-Each tier depends only on the ones above it in that list. Adding a format means
-a module in ``formats`` that subclasses ``TiffFile`` and overrides ``_open()``,
-plus a module in ``readers`` that subclasses ``ZarrSlideReader`` and names it.
+"""
