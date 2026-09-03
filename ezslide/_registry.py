@@ -9,6 +9,13 @@ def register_readers():
     pull wsidata — and spatialdata, anndata, cv2 and geopandas behind it — into
     every process that only wanted to read a TIFF.
 
+    Also patches :func:`wsidata.open_wsi`'s ``attach_images=True`` path
+    (:func:`ezslide.readers.datatree.patch_to_datatree`) so it resolves
+    channel count, dtype and channel names from the slide instead of assuming
+    3-channel ``uint8`` RGB — needed for multiplexed IF (``CYX``) and mono
+    (``YX``) images to attach correctly, not just standard H&E/brightfield
+    slides.
+
     Returns
     -------
     module
@@ -25,4 +32,7 @@ def register_readers():
         >>> wsi = open_wsi('slide.vsi')          # finds 'vsi_zarr' by suffix
     """
     from . import readers
+    from .readers.datatree import patch_to_datatree
+
+    patch_to_datatree()
     return readers

@@ -129,6 +129,57 @@ def test_pixel_size_read_from_ome():
 
 
 # --------------------------------------------------------------------------
+# thumbnail
+# --------------------------------------------------------------------------
+
+def test_thumbnail_rgb_is_composited():
+    rgb, _, _, src = _fixtures()
+    thumb = open_slide(rgb)[0].thumbnail
+    assert thumb is not None
+    assert thumb.mode == 'RGB'
+    assert np.array_equal(np.asarray(thumb), src['rgb'])
+
+
+def test_thumbnail_mono_is_grayscale():
+    _, label, _, src = _fixtures()
+    thumb = open_slide(label)[0].thumbnail
+    assert thumb is not None
+    assert np.array_equal(np.asarray(thumb), src['label'])
+
+
+def test_thumbnail_multiplex_is_not_none():
+    # A true multiplex stack (any channel count, here 4, uint16) used to fall
+    # through TiffSeries.thumbnail's shape checks and return None, which
+    # crashed ZarrSlideReader.get_thumbnail (and, in turn, WSIData's Jupyter
+    # repr) downstream. The preview is the first channel, normalized to uint8
+    # (PIL's 16-bit grayscale mode can't be resized at every ratio), so check
+    # shape/mode/dtype and that it's monotonic with the source rather than
+    # exact pixel equality.
+    _, _, cycif, src = _fixtures()
+    thumb = open_slide(cycif)[0].thumbnail
+    assert thumb is not None
+    assert thumb.mode == 'L'
+    arr = np.asarray(thumb)
+    assert arr.dtype == np.uint8
+    assert arr.shape == src['cycif'][0].shape
+    assert np.corrcoef(arr.ravel(), src['cycif'][0].ravel())[0, 1] > 0.99
+
+
+def test_get_thumbnail_on_multiplex_reader_does_not_crash():
+    import ezslide
+    ezslide.register_readers()
+    from wsidata.reader._reader_registry import READERS
+
+    _, _, cycif, _ = _fixtures()
+    reader = READERS.try_open(cycif, reader='tifffile_zarr')
+    try:
+        thumb = reader.get_thumbnail(size=64)
+        assert isinstance(thumb, np.ndarray)
+    finally:
+        reader.detach_reader()
+
+
+# --------------------------------------------------------------------------
 # channels
 # --------------------------------------------------------------------------
 

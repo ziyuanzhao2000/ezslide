@@ -33,6 +33,7 @@ from .formats.vsi import (
 from .readers import (
     ZarrSlideReader as ZarrSlideReader,
     pyramid_options as pyramid_options,
+    patch_to_datatree as patch_to_datatree,
 )
 from .writers import (
     convert as convert,
@@ -42,7 +43,7 @@ from .writers import (
 __all__ = [
     "array", "formats", "readers", "vendors", "writers",
     "register_readers",
-    "ZarrSlideReader", "pyramid_options",
+    "ZarrSlideReader", "pyramid_options", "patch_to_datatree",
     "TensorStoreArray", "as_tensorstore", "tensorstore_context",
     "ChannelView", "InterleavedView",
     "TiffFile", "VsiFile", "VsiSeries", "open_vsi",

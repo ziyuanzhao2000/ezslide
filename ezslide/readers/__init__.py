@@ -18,8 +18,10 @@ new module here and import it below, so the ``@register`` runs.
 """
 
 from .base import ZarrSlideReader, pyramid_options
+from .datatree import patch_to_datatree, to_datatree
 from .tiff import PyramidTiffFileZarrReader, TiffFileZarrReader
 from .vsi import VsiZarrReader
 
 __all__ = ["ZarrSlideReader", "pyramid_options", "TiffFileZarrReader",
-           "PyramidTiffFileZarrReader", "VsiZarrReader"]
+           "PyramidTiffFileZarrReader", "VsiZarrReader",
+           "patch_to_datatree", "to_datatree"]

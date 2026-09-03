@@ -477,6 +477,28 @@ class LazyTiffLevel(TiffLevel):
         self._parsed_metadata = parsed
 
 
+def _thumbnail_grayscale(img):
+    """Normalize a single-channel array to 0-255 uint8 for a PIL preview.
+
+    PIL's mode "I;16" (what ``Image.fromarray`` produces for a raw uint16
+    array) can't be resized at every reduction factor: ``Image.thumbnail()``
+    raises ``ValueError: image has wrong mode`` from its internal ``reduce()``
+    fast path once the ratio is large enough — reliably so for the kind of
+    16x+ downscale a real slide's thumbnail needs. uint8 grayscale ("L" mode)
+    resizes at any ratio, and a coarse preview has no use for 16-bit
+    precision anyway.
+    """
+    if img.dtype == np.uint8:
+        return img
+    img = img.astype(np.float32)
+    lo, hi = float(img.min()), float(img.max())
+    if hi > lo:
+        img = (img - lo) * (255.0 / (hi - lo))
+    else:
+        img = np.zeros_like(img)
+    return img.astype(np.uint8)
+
+
 class TiffSeries():
     def __init__(self, tiffseries, pyramidalize=False, pyramid=None):
         self._series = tiffseries
@@ -574,15 +596,37 @@ class TiffSeries():
     
     @property
     def thumbnail(self):
+        """A small PIL preview of the coarsest pyramid level.
+
+        Grayscale for a plane with no channel axis, RGB for an exactly-3-channel
+        uint8 plane (PIL can only composite 8-bit samples) — interleaved or
+        planar — and the first channel alone, in grayscale, for anything else:
+        a true multiplex/IF stack (any channel count, typically uint16), where
+        there's no single obviously "right" color composite for a low-res
+        preview, and reading only one channel avoids pulling all of them (49,
+        for a CyCIF stack) into memory for a 250px image.
+        """
         from PIL import Image
-        img = np.asarray(self._levels[-1].data[:])
-        if len(self.axes) == 2:
-            return Image.fromarray(img) # MINISBLACK
-        elif len(self.axes) == 3:
-            if self.axes[:2] == 'YX' and img.shape[2] == 3:
-                return Image.fromarray(img) # RGB
-            elif self.axes[1:] == 'YX' and img.shape[0] == 3:
-                return Image.fromarray(img.transpose(1,2,0)) # RGB
+        from ..array.channel import channel_axis_of
+
+        level = self._levels[-1]
+        axes = self.axes
+        c_ax = channel_axis_of(axes)
+
+        if c_ax is None:
+            img = _thumbnail_grayscale(np.asarray(level.data[:]))
+            return Image.fromarray(img)                               # MINISBLACK
+
+        if level.shape[c_ax] == 3 and np.dtype(level.dtype) == np.uint8:
+            img = np.asarray(level.data[:])
+            if c_ax != len(axes) - 1:
+                img = np.moveaxis(img, c_ax, -1)
+            return Image.fromarray(img)                              # RGB
+
+        idx = [slice(None)] * len(axes)
+        idx[c_ax] = 0
+        img = _thumbnail_grayscale(np.asarray(level.data[tuple(idx)]))
+        return Image.fromarray(img)                                   # first channel
 
     @property
     def data(self):

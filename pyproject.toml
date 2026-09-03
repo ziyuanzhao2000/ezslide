@@ -37,4 +37,5 @@ build-backend = "hatchling.build"
 [dependency-groups]
 dev = [
     "ipykernel>=7.3.0",
+    "matplotlib>=3.11.1",
 ]

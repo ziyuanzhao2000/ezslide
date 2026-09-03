@@ -196,6 +196,8 @@ class ZarrSlideReader(ReaderBase):
         )
 
     def get_region(self, x, y, width, height, level=0, **kwargs):
+        from ..array.channel import channel_axis_of
+
         level = self.translate_level(level)
         lv = self.series.levels[level]
         ds = self.properties.level_downsample[level]
@@ -204,8 +206,11 @@ class ZarrSlideReader(ReaderBase):
         idx[lv.x_ax] = slice(int(x / ds), int(x / ds) + width)
         arr = lv[tuple(idx)]                      # WriteableZarrArray.__getitem__
         arr = arr.compute() if hasattr(arr, "compute") else np.asarray(arr)
-        if lv.axes[:2] != "YX":                   # e.g. 'SYX' -> 'YXS'
-            arr = np.moveaxis(arr, lv.axes.index("S"), -1)
+        # 'C' for a planar multiplex file, else 'S' for interleaved RGB, else
+        # None for a plane with no channel axis at all (mono/label images).
+        c_ax = channel_axis_of(lv.axes)
+        if c_ax is not None and c_ax != len(lv.axes) - 1:
+            arr = np.moveaxis(arr, c_ax, -1)
         return arr
 
     def get_thumbnail(self, size, **kwargs):
