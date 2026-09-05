@@ -6,6 +6,11 @@ from . import writers as writers
 
 from ._registry import register_readers as register_readers
 
+from .io import (
+    open_wsi as open_wsi,
+    read_wsi as read_wsi,
+)
+
 from .array.channel import (
     ChannelView as ChannelView,
     InterleavedView as InterleavedView,
@@ -50,4 +55,5 @@ __all__ = [
     "open_slide", "channel_groups",
     "convert", "write_ome_tiff",
     "plan_rechunk", "iter_rechunked", "RechunkPlan",
+    "open_wsi", "read_wsi",
 ]
