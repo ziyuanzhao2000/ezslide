@@ -112,6 +112,37 @@ class EzslideZarrStore(SlideZarrStore):
         meta["dtype"] = self.dtype.str
         return meta
 
+    async def get(self, key, prototype, byte_range=None):
+        """Override chunk reads to fetch level-local pixels directly.
+        """
+        parsed = self._parse_chunk_key(key)
+        if parsed is None:
+            return await super().get(key, prototype, byte_range)
+
+        await self._ensure_open()
+        level, row, col = parsed
+        if level < 0 or level >= len(self._level_shape):
+            return None
+        h, w = self._level_shape[level]
+        ch_h, ch_w = self.chunks
+        chunk_w = min(ch_w, w - col * ch_w)
+        chunk_h = min(ch_h, h - row * ch_h)
+        if chunk_w <= 0 or chunk_h <= 0:
+            return None
+
+        arr = await asyncio.to_thread(
+            self._reader._get_level_region,
+            level,
+            row * ch_h,
+            col * ch_w,
+            chunk_h,
+            chunk_w,
+        )
+        if arr.ndim == 2:
+            arr = arr[:, :, None]
+        arr = np.ascontiguousarray(arr)
+        return arr.tobytes()
+
 
 async def _fetch_chunk_as_array(store, level, row, col):
     """Adapted from ``wsidata.reader._reader_datatree_zarr_v3._fetch_chunk_as_array``,

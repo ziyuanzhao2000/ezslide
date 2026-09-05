@@ -196,14 +196,17 @@ class ZarrSlideReader(ReaderBase):
         )
 
     def get_region(self, x, y, width, height, level=0, **kwargs):
+        level = self.translate_level(level)
+        ds = self.properties.level_downsample[level]
+        return self._get_level_region(level, int(y / ds), int(x / ds), height, width)
+
+    def _get_level_region(self, level, y0, x0, height, width):
         from ..array.channel import channel_axis_of
 
-        level = self.translate_level(level)
         lv = self.series.levels[level]
-        ds = self.properties.level_downsample[level]
         idx = [slice(None)] * len(lv.shape)
-        idx[lv.y_ax] = slice(int(y / ds), int(y / ds) + height)
-        idx[lv.x_ax] = slice(int(x / ds), int(x / ds) + width)
+        idx[lv.y_ax] = slice(y0, y0 + height)
+        idx[lv.x_ax] = slice(x0, x0 + width)
         arr = lv[tuple(idx)]                      # WriteableZarrArray.__getitem__
         arr = arr.compute() if hasattr(arr, "compute") else np.asarray(arr)
         # 'C' for a planar multiplex file, else 'S' for interleaved RGB, else
