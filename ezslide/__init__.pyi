@@ -1,4 +1,5 @@
 from . import array as array
+from . import dataset as dataset
 from . import formats as formats
 from . import readers as readers
 from . import vendors as vendors
@@ -25,6 +26,11 @@ from .array.tensorstore_array import (
     as_tensorstore as as_tensorstore,
     tensorstore_context as tensorstore_context,
 )
+from .dataset import (
+    PatchBlockDataset as PatchBlockDataset,
+    PatchDataset as PatchDataset,
+    tile_images as tile_images,
+)
 from .formats.open import (
     channel_groups as channel_groups,
     open_slide as open_slide,
@@ -46,10 +52,11 @@ from .writers import (
 )
 
 __all__ = [
-    "array", "formats", "readers", "vendors", "writers",
+    "array", "dataset", "formats", "readers", "vendors", "writers",
     "register_readers",
     "ZarrSlideReader", "pyramid_options", "patch_to_datatree",
     "TensorStoreArray", "as_tensorstore", "tensorstore_context",
+    "PatchDataset", "PatchBlockDataset", "tile_images",
     "ChannelView", "InterleavedView",
     "TiffFile", "VsiFile", "VsiSeries", "open_vsi",
     "open_slide", "channel_groups",

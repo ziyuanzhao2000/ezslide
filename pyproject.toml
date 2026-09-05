@@ -1,6 +1,6 @@
 [project]
 name = "ezslide"
-version = "0.2.1"
+version = "0.3.0"
 description = "Wrapper around tifffile to interface with wsidata for easy accessing microscopy image data."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -22,6 +22,9 @@ dependencies = [
     "wsidata>=0.11.0",
     "zarr>=3.0",
 ]
+
+[project.optional-dependencies]
+torch = ["torch"]
 
 [project.scripts]
 ezslide = "ezslide.cli:main"

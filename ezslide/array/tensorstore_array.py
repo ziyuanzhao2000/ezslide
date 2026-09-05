@@ -44,6 +44,7 @@ as_tensorstore     wrap an open zarr array, native driver where possible
 
 from __future__ import annotations
 
+import os
 import warnings
 
 import numpy as np
@@ -64,7 +65,39 @@ CACHE_MAX_BYTES = 2 * 1024 * 1024 * 1024  # 2 GiB
 _context = None
 
 
-def tensorstore_context(max_bytes=None):
+def _concurrency_limit(num_workers):
+    """Per-process thread budget so N sibling processes divide the machine
+    instead of each claiming it: max(1, cpu_count() // num_workers).
+
+    Without this, tensorstore's own IO/decode thread pool defaults to roughly
+    one thread per core *per process*. That is fine for a single process, but
+    a DataLoader with num_workers>1 spawns that many processes, each opening
+    its own tensorstore context and its own equally-sized pool -- observed in
+    practice as 300+ OS threads from a single worker and a 96-core box driven
+    to a load average above 300, which made an 8-worker run slower than one
+    worker.
+    """
+    cpu_count = os.cpu_count() or 1
+    return max(1, cpu_count // max(1, num_workers))
+
+
+def _limit_zarr_threads(num_workers):
+    """Cap zarr's own global thread pool the same way.
+
+    zarr v3 dispatches every store operation through a process-wide
+    ``ThreadPoolExecutor`` it builds lazily on first use
+    (``zarr.core.sync._get_executor``), sized by Python's default
+    (``min(32, cpu_count() + 4)``) when unset -- a second, independent
+    thread pool alongside tensorstore's own, not covered by
+    ``data_copy_concurrency``. Setting this after that executor has already
+    been built in a process has no effect, same as ``tensorstore_context``'s
+    shared context.
+    """
+    import zarr
+    zarr.config.set({"threading.max_workers": _concurrency_limit(num_workers)})
+
+
+def tensorstore_context(max_bytes=None, num_workers=None):
     """The process-wide ``ts.Context``, created on first use.
 
     Parameters
@@ -73,6 +106,18 @@ def tensorstore_context(max_bytes=None):
         Build a *separate* context with this cache budget instead of returning
         the shared one — for a reader that should not evict everyone else's
         chunks, or ``0`` to disable caching for it.
+    num_workers : int, optional
+        Expected number of sibling processes reading through a context in
+        this process (e.g. a DataLoader's ``num_workers``). When given,
+        caps ``data_copy_concurrency.limit`` to
+        ``max(1, os.cpu_count() // num_workers)`` so N processes split the
+        machine instead of each opening an unbounded thread pool sized for
+        it alone, and does the same for zarr's own global thread pool (see
+        ``_limit_zarr_threads``). For the shared context (``max_bytes=None``),
+        only takes effect the first time it is built in a process — later
+        calls with a different value are no-ops, since the context already
+        exists; the zarr-side cap has the same one-shot behavior, for the
+        same reason (zarr also builds its executor lazily, once).
 
     Notes
     -----
@@ -81,11 +126,18 @@ def tensorstore_context(max_bytes=None):
     stale chunks, and this package writes pyramid levels exactly that way.
     """
     global _context
+    if num_workers is not None:
+        _limit_zarr_threads(num_workers)
     if max_bytes is not None:
-        return ts.Context({"cache_pool": {"total_bytes_limit": int(max_bytes)}})
+        spec = {"cache_pool": {"total_bytes_limit": int(max_bytes)}}
+        if num_workers is not None:
+            spec["data_copy_concurrency"] = {"limit": _concurrency_limit(num_workers)}
+        return ts.Context(spec)
     if _context is None:
-        _context = ts.Context(
-            {"cache_pool": {"total_bytes_limit": int(CACHE_MAX_BYTES)}})
+        spec = {"cache_pool": {"total_bytes_limit": int(CACHE_MAX_BYTES)}}
+        if num_workers is not None:
+            spec["data_copy_concurrency"] = {"limit": _concurrency_limit(num_workers)}
+        _context = ts.Context(spec)
     return _context
 
 

@@ -38,7 +38,17 @@ def open_wsi(wsi, store="auto", reader=None, scene=None, **kwargs):
     :class:`wsidata.WSIData`
     """
     from wsidata import open_wsi as _open_wsi
+    from wsidata.reader._reader_registry import READERS
     from wsidata.reader.spatialdata_image2d import SpatialDataImage2DReader
+
+    if reader is None or reader not in READERS:
+        # reader=None means auto-detect by extension, which needs ezslide's
+        # readers (tifffile_zarr, vsi_zarr, ...) in the registry to find them;
+        # an explicit reader name not yet in the registry needs the same.
+        # register_readers() is idempotent, so this is a no-op once it's run.
+        from ._registry import register_readers
+
+        register_readers()
 
     slide_data = _open_wsi(wsi, store=store, reader=reader, scene=scene, **kwargs)
 

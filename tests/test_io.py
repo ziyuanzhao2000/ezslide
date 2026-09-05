@@ -11,6 +11,7 @@ nothing here needs a real slide.
 
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 
@@ -66,6 +67,40 @@ def test_open_wsi_does_not_overwrite_existing_wsi_source():
     assert reopened.attrs['wsi_source']['path'] == os.path.realpath(path)
 
 
+def test_open_wsi_registers_readers_on_demand_with_explicit_reader():
+    # In a fresh interpreter that never called register_readers(), passing
+    # reader='tifffile_zarr' explicitly must still work.
+    path, _ = _fixture()
+    code = (
+        'import ezslide\n'
+        'from wsidata.reader._reader_registry import READERS\n'
+        'print("tifffile_zarr" in READERS)\n'
+        f'wsi = ezslide.open_wsi({path!r}, reader="tifffile_zarr", store=None)\n'
+        'print("tifffile_zarr" in READERS)\n'
+        'print(wsi.reader.name)\n'
+    )
+    done = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.split() == ['False', 'True', 'tifffile_zarr']
+
+
+def test_open_wsi_registers_readers_on_demand_with_auto_detect():
+    # Same, but with reader=None (extension-based auto-detect) — ezslide's
+    # readers must be in the registry *before* wsidata picks one by
+    # extension, or vsi/tifffile-family slides would never be found.
+    path, _ = _fixture()
+    code = (
+        'import ezslide\n'
+        'from wsidata.reader._reader_registry import READERS\n'
+        'print("tifffile_zarr" in READERS)\n'
+        f'ezslide.open_wsi({path!r}, store=None)\n'
+        'print("tifffile_zarr" in READERS)\n'
+    )
+    done = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.split() == ['False', 'True']
+
+
 # --------------------------------------------------------------------------
 # read_wsi reconstructs from the store alone
 # --------------------------------------------------------------------------
@@ -90,6 +125,28 @@ def test_read_wsi_raises_without_wsi_source():
     wsi.close()
 
     _assert_raises('wsi_source', ezslide.read_wsi, store)
+
+
+def test_read_wsi_registers_readers_on_demand():
+    # In a fresh interpreter that never called register_readers(), a store
+    # written with an ezslide reader (tifffile_zarr) must still round-trip:
+    # read_wsi has to register it before handing the reader name to open_wsi.
+    path, store = _fixture()
+    wsi = ezslide.open_wsi(path, store=store, reader='tifffile_zarr')
+    wsi.write(store)
+    wsi.close()
+
+    code = (
+        'import ezslide\n'
+        'from wsidata.reader._reader_registry import READERS\n'
+        'print("tifffile_zarr" in READERS)\n'
+        f'wsi = ezslide.read_wsi({store!r})\n'
+        'print("tifffile_zarr" in READERS)\n'
+        'print(wsi.reader.name)\n'
+    )
+    done = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.split() == ['False', 'True', 'tifffile_zarr']
 
 
 def test_read_wsi_raises_for_missing_store():
