@@ -1,6 +1,6 @@
 [project]
 name = "ezslide"
-version = "0.2.0"
+version = "0.2.1"
 description = "Wrapper around tifffile to interface with wsidata for easy accessing microscopy image data."
 readme = "README.md"
 requires-python = ">=3.12"
