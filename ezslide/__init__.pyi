@@ -10,6 +10,14 @@ from ._registry import register_readers as register_readers
 from .io import (
     open_wsi as open_wsi,
     read_wsi as read_wsi,
+    SLIDE_ID as SLIDE_ID,
+    resolve_manifest as resolve_manifest,
+    iter_slides as iter_slides,
+    open_slides as open_slides,
+)
+from ._level_select import (
+    select_level_for_downsample as select_level_for_downsample,
+    resolve_display_level as resolve_display_level,
 )
 
 from .array.channel import (
@@ -63,4 +71,6 @@ __all__ = [
     "convert", "write_ome_tiff",
     "plan_rechunk", "iter_rechunked", "RechunkPlan",
     "open_wsi", "read_wsi",
+    "SLIDE_ID", "resolve_manifest", "iter_slides", "open_slides",
+    "select_level_for_downsample", "resolve_display_level",
 ]

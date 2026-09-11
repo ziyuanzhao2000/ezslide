@@ -14,10 +14,19 @@ module is purely additive.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING, Iterator
 
-__all__ = ["open_wsi", "read_wsi", "WSI_SOURCE_KEY"]
+if TYPE_CHECKING:
+    import pandas as pd
+    from wsidata import WSIData
+
+__all__ = [
+    "open_wsi", "read_wsi", "WSI_SOURCE_KEY",
+    "SLIDE_ID", "resolve_manifest", "iter_slides", "open_slides",
+]
 
 WSI_SOURCE_KEY = "wsi_source"
+SLIDE_ID = "slide_id"
 
 
 def open_wsi(wsi, store="auto", reader=None, scene=None, **kwargs):
@@ -120,3 +129,105 @@ def read_wsi(store, **kwargs):
     kwargs.setdefault("reader", source.get("reader"))
     kwargs.setdefault("store", store)
     return open_wsi(path, **kwargs)
+
+
+def resolve_manifest(
+    slides_table: "pd.DataFrame", store_col: str, slide_id_col: str
+) -> list[tuple[str, str]]:
+    """Normalise a cohort manifest to a list of ``(slide_id, store)`` pairs."""
+    if store_col not in slides_table.columns:
+        raise ValueError(
+            f"slides_table has no '{store_col}' column; pass store_col= to name "
+            f"the column holding the .zarr store paths. Got: {list(slides_table.columns)}"
+        )
+    stores = slides_table[store_col].tolist()
+    if slide_id_col in slides_table.columns:
+        ids = [str(v) for v in slides_table[slide_id_col]]
+    else:
+        ids = [Path(str(s)).stem for s in stores]
+    return list(zip(ids, stores))
+
+
+def iter_slides(
+    slides_table: "pd.DataFrame",
+    *,
+    store_col: str = "store",
+    slide_id_col: str = SLIDE_ID,
+    attach_images: bool = False,
+    close: bool = True,
+) -> Iterator[tuple[str, "WSIData"]]:
+    """Yield ``(slide_id, wsi)`` one slide at a time, closing each before advancing.
+
+    Peak memory is one slide, not the whole cohort, regardless of how many
+    stores ``slides_table`` lists.
+
+    Parameters
+    ----------
+    slides_table
+        DataFrame with one row per slide. Must have a column of Zarr store
+        paths (``store_col``). A ``slide_id`` column is used if present,
+        otherwise ids are derived from the store filenames.
+    store_col
+        Column holding the ``.zarr`` store paths written by ``wsi.write()``.
+    slide_id_col
+        Column holding slide ids.
+    attach_images
+        Reattach the WSI pixels. Needed for anything that reads image data
+        (patch extraction, plotting); unnecessary for table-only work.
+    close
+        Close each slide's reader after yielding. Set False only if the
+        caller keeps references to the yielded slides beyond the loop body.
+
+    Yields
+    ------
+    (slide_id, wsi) : (str, WSIData)
+
+    Examples
+    --------
+    >>> import pandas as pd, ezslide
+    >>> manifest = pd.DataFrame({"store": sorted(glob("cohort/*.zarr"))})
+    >>> for slide_id, wsi in ezslide.iter_slides(manifest):
+    ...     table = wsi.tables["tiles_table"]
+    """
+    for slide_id, store in resolve_manifest(slides_table, store_col, slide_id_col):
+        wsi = read_wsi(store, attach_images=attach_images)
+        try:
+            yield slide_id, wsi
+        finally:
+            if close:
+                try:
+                    wsi.close()
+                except Exception:
+                    # A reader that never attached (attach_images=False on some
+                    # backends) has nothing to detach; not worth failing the loop.
+                    pass
+
+
+def open_slides(
+    slides_table: "pd.DataFrame",
+    *,
+    store_col: str = "store",
+    slide_id_col: str = SLIDE_ID,
+    attach_images: bool = True,
+) -> dict[str, "WSIData"]:
+    """Open a whole cohort at once, returning ``{slide_id: WSIData}``.
+
+    The eager counterpart to :func:`iter_slides`, for callers that need
+    random access to pixels across slides -- patch extraction and galleries,
+    where the rows being read come from many slides interleaved.
+
+    This is cheaper than it sounds: a ``WSIData`` holds a lazy reader plus
+    the slide's tables, so the cost is the tables, not the pixels. It is the
+    tile *reads* that are expensive, and those stay bounded by the selected
+    subset.
+    """
+    return {
+        slide_id: wsi
+        for slide_id, wsi in iter_slides(
+            slides_table,
+            store_col=store_col,
+            slide_id_col=slide_id_col,
+            attach_images=attach_images,
+            close=False,
+        )
+    }
