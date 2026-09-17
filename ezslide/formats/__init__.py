@@ -9,7 +9,7 @@
     reimplementing it: an ``.ets`` stack is presented as a synthetic BigTIFF,
     so only the metadata handling differs.
 ``open``
-    ``open_slide`` — the suffix-to-class decision every caller needs and no
+    ``open_wsi`` — the suffix-to-class decision every caller needs and no
     single format module can make — and ``channel_groups``, which reassembles
     the series a format split into channels.
 

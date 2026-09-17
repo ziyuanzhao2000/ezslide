@@ -8,8 +8,8 @@ from . import writers as writers
 from ._registry import register_readers as register_readers
 
 from .io import (
-    open_wsi as open_wsi,
-    read_wsi as read_wsi,
+    open_slide as open_slide,
+    read_slide as read_slide,
     SLIDE_ID as SLIDE_ID,
     resolve_manifest as resolve_manifest,
     iter_slides as iter_slides,
@@ -41,7 +41,7 @@ from .dataset import (
 )
 from .formats.open import (
     channel_groups as channel_groups,
-    open_slide as open_slide,
+    open_wsi as open_wsi,
 )
 from .formats.tiff import TiffFile as TiffFile
 from .formats.vsi import (
@@ -67,10 +67,10 @@ __all__ = [
     "PatchDataset", "PatchBlockDataset", "tile_images",
     "ChannelView", "InterleavedView",
     "TiffFile", "VsiFile", "VsiSeries", "open_vsi",
-    "open_slide", "channel_groups",
+    "open_wsi", "channel_groups",
     "convert", "write_ome_tiff",
     "plan_rechunk", "iter_rechunked", "RechunkPlan",
-    "open_wsi", "read_wsi",
+    "open_slide", "read_slide",
     "SLIDE_ID", "resolve_manifest", "iter_slides", "open_slides",
     "select_level_for_downsample", "resolve_display_level",
 ]

@@ -1,11 +1,11 @@
-"""The way in: open a whole slide image and remember where it came from.
+"""The way in: open a slide and remember where it came from.
 
 ``wsidata.open_wsi()`` returns a ``WSIData`` backed by a Zarr store, but
 nothing in that store records which slide file produced it or which reader
-opened it. :func:`open_wsi` here is a thin wrapper that fills that gap by
+opened it. :func:`open_slide` here is a thin wrapper that fills that gap by
 writing a ``wsi_source`` block into ``attrs`` (the same mechanism wsidata
 already uses for ``slide_properties``, which is known to round-trip through
-``write()``/``read_zarr()``), and :func:`read_wsi` reads it back to
+``write()``/``read_zarr()``), and :func:`read_slide` reads it back to
 reconstruct a full ``WSIData`` from a store path alone.
 
 Calling ``wsidata.open_wsi()`` directly still works exactly as before; this
@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from wsidata import WSIData
 
 __all__ = [
-    "open_wsi", "read_wsi", "WSI_SOURCE_KEY",
+    "open_slide", "read_slide", "WSI_SOURCE_KEY",
     "SLIDE_ID", "resolve_manifest", "iter_slides", "open_slides",
 ]
 
@@ -29,12 +29,12 @@ WSI_SOURCE_KEY = "wsi_source"
 SLIDE_ID = "slide_id"
 
 
-def open_wsi(wsi, store="auto", reader=None, scene=None, **kwargs):
-    """Open a whole slide image, recording its source path and reader in attrs.
+def open_slide(wsi, store="auto", reader=None, scene=None, **kwargs):
+    """Open a slide, recording its source path and reader in attrs.
 
     Same signature and behavior as :func:`wsidata.open_wsi`. The returned
     ``WSIData``'s ``attrs["wsi_source"]`` records the resolved slide path and
-    reader name, so it can later be reconstructed with :func:`read_wsi`
+    reader name, so it can later be reconstructed with :func:`read_slide`
     without re-supplying the path.
 
     Parameters
@@ -71,20 +71,20 @@ def open_wsi(wsi, store="auto", reader=None, scene=None, **kwargs):
     return slide_data
 
 
-def read_wsi(store, **kwargs):
+def read_slide(store, **kwargs):
     """Reconstruct a WSIData from a Zarr store alone, using its recorded ``wsi_source``.
 
-    Equivalent to ``open_wsi(<recorded slide path>, store=store,
-    reader=<recorded reader>, **kwargs)``, so any :func:`open_wsi` keyword
+    Equivalent to ``open_slide(<recorded slide path>, store=store,
+    reader=<recorded reader>, **kwargs)``, so any :func:`open_slide` keyword
     (``attach_images``, ``attach_thumbnail``, ``scene``, ...) still applies.
 
     Parameters
     ----------
     store : str or Path
         Path to a Zarr store previously written by a ``WSIData`` opened
-        through this module's :func:`open_wsi`.
+        through this module's :func:`open_slide`.
     **kwargs
-        Forwarded to :func:`open_wsi`.
+        Forwarded to :func:`open_slide`.
 
     Returns
     -------
@@ -110,7 +110,7 @@ def read_wsi(store, **kwargs):
         raise ValueError(
             f"Store '{store}' has no recorded WSI source (attrs['{WSI_SOURCE_KEY}']). "
             "It may have been written by plain wsidata.open_wsi()/SpatialData.write(), "
-            f"or before this feature was added. Use ezslide.open_wsi(<slide path>, "
+            f"or before this feature was added. Use ezslide.open_slide(<slide path>, "
             f"store='{store}') instead."
         )
 
@@ -123,12 +123,12 @@ def read_wsi(store, **kwargs):
             raise ValueError(
                 f"Recorded WSI source '{source['path']}' for store '{store}' no longer "
                 f"exists (also checked '{candidate}'). Re-open explicitly with "
-                f"ezslide.open_wsi(<slide path>, store='{store}')."
+                f"ezslide.open_slide(<slide path>, store='{store}')."
             )
 
     kwargs.setdefault("reader", source.get("reader"))
     kwargs.setdefault("store", store)
-    return open_wsi(path, **kwargs)
+    return open_slide(path, **kwargs)
 
 
 def resolve_manifest(
@@ -190,7 +190,7 @@ def iter_slides(
     ...     table = wsi.tables["tiles_table"]
     """
     for slide_id, store in resolve_manifest(slides_table, store_col, slide_id_col):
-        wsi = read_wsi(store, attach_images=attach_images)
+        wsi = read_slide(store, attach_images=attach_images)
         try:
             yield slide_id, wsi
         finally:

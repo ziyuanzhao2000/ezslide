@@ -1,4 +1,4 @@
-"""Tests for ``ezslide.open_wsi`` / ``ezslide.read_wsi`` (wsi_source round-trip).
+"""Tests for ``ezslide.open_slide`` / ``ezslide.read_slide`` (wsi_source round-trip).
 
 Runnable either way::
 
@@ -45,29 +45,29 @@ def _fixture():
 
 
 # --------------------------------------------------------------------------
-# open_wsi records wsi_source
+# open_slide records wsi_source
 # --------------------------------------------------------------------------
 
-def test_open_wsi_records_wsi_source():
+def test_open_slide_records_wsi_source():
     path, store = _fixture()
-    wsi = ezslide.open_wsi(path, store=store, reader='tifffile_zarr')
+    wsi = ezslide.open_slide(path, store=store, reader='tifffile_zarr')
     assert wsi.attrs['wsi_source'] == {
         'path': os.path.realpath(path),
         'reader': 'tifffile_zarr',
     }
 
 
-def test_open_wsi_does_not_overwrite_existing_wsi_source():
+def test_open_slide_does_not_overwrite_existing_wsi_source():
     path, store = _fixture()
-    wsi = ezslide.open_wsi(path, store=store, reader='tifffile_zarr')
+    wsi = ezslide.open_slide(path, store=store, reader='tifffile_zarr')
     wsi.write(store)
     wsi.close()
 
-    reopened = ezslide.open_wsi(path, store=store, reader='tifffile_zarr')
+    reopened = ezslide.open_slide(path, store=store, reader='tifffile_zarr')
     assert reopened.attrs['wsi_source']['path'] == os.path.realpath(path)
 
 
-def test_open_wsi_registers_readers_on_demand_with_explicit_reader():
+def test_open_slide_registers_readers_on_demand_with_explicit_reader():
     # In a fresh interpreter that never called register_readers(), passing
     # reader='tifffile_zarr' explicitly must still work.
     path, _ = _fixture()
@@ -75,7 +75,7 @@ def test_open_wsi_registers_readers_on_demand_with_explicit_reader():
         'import ezslide\n'
         'from wsidata.reader._reader_registry import READERS\n'
         'print("tifffile_zarr" in READERS)\n'
-        f'wsi = ezslide.open_wsi({path!r}, reader="tifffile_zarr", store=None)\n'
+        f'wsi = ezslide.open_slide({path!r}, reader="tifffile_zarr", store=None)\n'
         'print("tifffile_zarr" in READERS)\n'
         'print(wsi.reader.name)\n'
     )
@@ -84,7 +84,7 @@ def test_open_wsi_registers_readers_on_demand_with_explicit_reader():
     assert done.stdout.split() == ['False', 'True', 'tifffile_zarr']
 
 
-def test_open_wsi_registers_readers_on_demand_with_auto_detect():
+def test_open_slide_registers_readers_on_demand_with_auto_detect():
     # Same, but with reader=None (extension-based auto-detect) — ezslide's
     # readers must be in the registry *before* wsidata picks one by
     # extension, or vsi/tifffile-family slides would never be found.
@@ -93,7 +93,7 @@ def test_open_wsi_registers_readers_on_demand_with_auto_detect():
         'import ezslide\n'
         'from wsidata.reader._reader_registry import READERS\n'
         'print("tifffile_zarr" in READERS)\n'
-        f'ezslide.open_wsi({path!r}, store=None)\n'
+        f'ezslide.open_slide({path!r}, store=None)\n'
         'print("tifffile_zarr" in READERS)\n'
     )
     done = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True)
@@ -102,21 +102,21 @@ def test_open_wsi_registers_readers_on_demand_with_auto_detect():
 
 
 # --------------------------------------------------------------------------
-# read_wsi reconstructs from the store alone
+# read_slide reconstructs from the store alone
 # --------------------------------------------------------------------------
 
-def test_read_wsi_round_trips():
+def test_read_slide_round_trips():
     path, store = _fixture()
-    wsi = ezslide.open_wsi(path, store=store, reader='tifffile_zarr')
+    wsi = ezslide.open_slide(path, store=store, reader='tifffile_zarr')
     wsi.write(store)
     wsi.close()
 
-    reloaded = ezslide.read_wsi(store)
+    reloaded = ezslide.read_slide(store)
     assert reloaded.properties.shape == wsi.properties.shape
     assert reloaded.reader.name == 'tifffile_zarr'
 
 
-def test_read_wsi_raises_without_wsi_source():
+def test_read_slide_raises_without_wsi_source():
     from wsidata import open_wsi as wsidata_open_wsi
 
     path, store = _fixture()
@@ -124,15 +124,15 @@ def test_read_wsi_raises_without_wsi_source():
     wsi.write(store)
     wsi.close()
 
-    _assert_raises('wsi_source', ezslide.read_wsi, store)
+    _assert_raises('wsi_source', ezslide.read_slide, store)
 
 
-def test_read_wsi_registers_readers_on_demand():
+def test_read_slide_registers_readers_on_demand():
     # In a fresh interpreter that never called register_readers(), a store
     # written with an ezslide reader (tifffile_zarr) must still round-trip:
-    # read_wsi has to register it before handing the reader name to open_wsi.
+    # read_slide has to register it before handing the reader name to open_slide.
     path, store = _fixture()
-    wsi = ezslide.open_wsi(path, store=store, reader='tifffile_zarr')
+    wsi = ezslide.open_slide(path, store=store, reader='tifffile_zarr')
     wsi.write(store)
     wsi.close()
 
@@ -140,7 +140,7 @@ def test_read_wsi_registers_readers_on_demand():
         'import ezslide\n'
         'from wsidata.reader._reader_registry import READERS\n'
         'print("tifffile_zarr" in READERS)\n'
-        f'wsi = ezslide.read_wsi({store!r})\n'
+        f'wsi = ezslide.read_slide({store!r})\n'
         'print("tifffile_zarr" in READERS)\n'
         'print(wsi.reader.name)\n'
     )
@@ -149,13 +149,13 @@ def test_read_wsi_registers_readers_on_demand():
     assert done.stdout.split() == ['False', 'True', 'tifffile_zarr']
 
 
-def test_read_wsi_raises_for_missing_store():
-    _assert_raises('does not exist', ezslide.read_wsi, '/no/such/store.zarr')
+def test_read_slide_raises_for_missing_store():
+    _assert_raises('does not exist', ezslide.read_slide, '/no/such/store.zarr')
 
 
-def test_read_wsi_falls_back_to_path_next_to_store():
+def test_read_slide_falls_back_to_path_next_to_store():
     path, store = _fixture()
-    wsi = ezslide.open_wsi(path, store=store, reader='tifffile_zarr')
+    wsi = ezslide.open_slide(path, store=store, reader='tifffile_zarr')
     wsi.write(store)
     wsi.close()
 
@@ -163,19 +163,19 @@ def test_read_wsi_falls_back_to_path_next_to_store():
     if moved != path:
         shutil.move(path, moved)
 
-    reloaded = ezslide.read_wsi(store)
+    reloaded = ezslide.read_slide(store)
     assert reloaded.properties.shape == wsi.properties.shape
 
 
-def test_read_wsi_raises_when_slide_unresolvable():
+def test_read_slide_raises_when_slide_unresolvable():
     path, store = _fixture()
-    wsi = ezslide.open_wsi(path, store=store, reader='tifffile_zarr')
+    wsi = ezslide.open_slide(path, store=store, reader='tifffile_zarr')
     wsi.write(store)
     wsi.close()
 
     os.remove(path)
 
-    _assert_raises('no longer', ezslide.read_wsi, store)
+    _assert_raises('no longer', ezslide.read_slide, store)
 
 
 # --------------------------------------------------------------------------

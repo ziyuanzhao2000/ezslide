@@ -42,7 +42,7 @@ def _cohort(n=3):
         path = os.path.join(d, f'slide{i}.tif')
         tifffile.imwrite(path, rgb, tile=(128, 128), photometric='rgb')
         store = os.path.join(d, f'slide{i}.zarr')
-        wsi = ezslide.open_wsi(path, store=store, reader='tifffile_zarr')
+        wsi = ezslide.open_slide(path, store=store, reader='tifffile_zarr')
         wsi.write(store)
         wsi.close()
         stores.append(store)

@@ -51,10 +51,10 @@ def test_cli_import_loads_nothing_heavy():
     assert _loaded('import ezslide.cli') == []
 
 
-def test_open_slide_does_not_need_wsidata():
+def test_open_wsi_does_not_need_wsidata():
     # The read path and the wsidata path are separate tiers; reaching for one
     # must not drag in the other.
-    assert 'wsidata' not in _loaded('from ezslide import open_slide')
+    assert 'wsidata' not in _loaded('from ezslide import open_wsi')
 
 
 def test_writer_does_not_need_wsidata_or_zarr():

@@ -69,7 +69,7 @@ import tifffile
 
 from ..array.rechunk import DEFAULT_MAX_MEM, iter_rechunked, plan_rechunk
 from ..array.reduce import block_reduce
-from ..formats.open import channel_groups, open_slide
+from ..formats.open import channel_groups, open_wsi
 from ..formats.tiff import TiffFile, TiffLevel, TiffSeries, infer_axes
 
 __all__ = ['write_ome_tiff', 'convert', 'OME_NAMESPACE', 'PROVENANCE_NAMESPACE']
@@ -632,7 +632,7 @@ def convert(src, dst, *, series=0, levels=None, tile=None,
         As for :func:`write_ome_tiff`.
     """
     src = Path(src)
-    slide = open_slide(src)
+    slide = open_wsi(src)
     try:
         target = slide if series == 'all' else _with_siblings(slide, series)
         return write_ome_tiff(target, dst, levels=levels, tile=tile,

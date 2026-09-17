@@ -1,17 +1,17 @@
-"""Opening a slide without knowing what kind of file it is.
+"""Opening a WSI file without knowing what kind of file it is.
 
 The one thing every caller needs and no single format module can provide:
 which class to hand the path to. Both the CLI and the OME-TIFF writer grew
 their own private copy of this three-line decision, and anything outside the
 package that wants a reader — a viewer, a notebook — grows a third.
 
-``open_slide`` is not a replacement for ``wsidata.open_wsi``. That is the door
+``open_wsi`` is not a replacement for ``wsidata.open_wsi``. That is the door
 into the SpatialData world, and it is the reason :func:`ezslide.pyramid_options`
-exists: ``open_wsi`` builds its reader through a registry that forwards no
-options, so ``pyramidalize`` has to travel by context variable. When all you
-want is the slide itself — with options passed as arguments, every series
-reachable by index, and no zarr store written next to the file — open it
-directly.
+exists: ``ezslide.open_slide`` builds its reader through a registry that
+forwards no options, so ``pyramidalize`` has to travel by context variable.
+When all you want is the raw file itself — with options passed as arguments,
+every series reachable by index, and no zarr store written next to the file —
+open it directly.
 """
 
 from __future__ import annotations
@@ -21,19 +21,19 @@ from pathlib import Path
 from .tiff import TiffFile
 from .vsi import VsiFile
 
-__all__ = ['open_slide', 'channel_groups', 'VSI_SUFFIXES']
+__all__ = ['open_wsi', 'channel_groups', 'VSI_SUFFIXES']
 
 #: Suffixes that mean a cellSens dataset rather than something tifffile reads.
 VSI_SUFFIXES = ('.vsi', '.ets')
 
 
-def slide_class(file):
+def wsi_class(file):
     """The format class that reads ``file``, chosen by suffix."""
     return VsiFile if Path(str(file)).suffix.lower() in VSI_SUFFIXES else TiffFile
 
 
-def open_slide(file, **kwargs):
-    """Open any slide ezslide reads, dispatching on the file suffix.
+def open_wsi(file, **kwargs):
+    """Open any WSI file ezslide reads, dispatching on the file suffix.
 
     Parameters
     ----------
@@ -56,16 +56,16 @@ def open_slide(file, **kwargs):
     --------
     .. code-block:: python
 
-        >>> with open_slide('slide.svs') as slide:
+        >>> with open_wsi('slide.svs') as slide:
         ...     series = slide[0]
 
         >>> # A flat export gets the pyramid it does not have on disk. This is
         >>> # a no-op on a file that is already pyramidal, so it is safe to ask
         >>> # for unconditionally.
-        >>> labels = open_slide('tokens.tif', pyramidalize=True,
-        ...                     pyramid={'how': 'mode', 'cache': 'tmp'})
+        >>> labels = open_wsi('tokens.tif', pyramidalize=True,
+        ...                   pyramid={'how': 'mode', 'cache': 'tmp'})
     """
-    return slide_class(file)(file, **kwargs)
+    return wsi_class(file)(file, **kwargs)
 
 
 def channel_groups(slide):

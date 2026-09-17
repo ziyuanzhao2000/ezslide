@@ -1,4 +1,4 @@
-"""Tests for the format-neutral API: open_slide, multiscale, channel views, calibration.
+"""Tests for the format-neutral API: open_wsi, multiscale, channel views, calibration.
 
 Runnable either way::
 
@@ -21,9 +21,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import ezslide
 from ezslide import (ChannelView, InterleavedView, channel_groups,
-                     open_slide)
+                     open_wsi)
 from ezslide.array.channel import channel_axis_of, n_channels
-from ezslide.formats.open import slide_class
+from ezslide.formats.open import wsi_class
 
 CHANNELS = ['DAPI', 'CD3', 'CD8', 'PANCK']
 
@@ -44,25 +44,25 @@ def _fixtures():
 
 
 def _pyramidal(path, how='mean'):
-    return open_slide(path, pyramidalize=True,
+    return open_wsi(path, pyramidalize=True,
                       pyramid={'how': how, 'levels': 8, 'cache': 'tmp'})
 
 
 # --------------------------------------------------------------------------
-# open_slide
+# open_wsi
 # --------------------------------------------------------------------------
 
 def test_dispatch_by_suffix():
-    assert slide_class('a.svs') is ezslide.TiffFile
-    assert slide_class('a.ome.tif') is ezslide.TiffFile
-    assert slide_class('a.vsi') is ezslide.VsiFile
-    assert slide_class('a.VSI') is ezslide.VsiFile      # case-insensitive
-    assert slide_class('a.ets') is ezslide.VsiFile
+    assert wsi_class('a.svs') is ezslide.TiffFile
+    assert wsi_class('a.ome.tif') is ezslide.TiffFile
+    assert wsi_class('a.vsi') is ezslide.VsiFile
+    assert wsi_class('a.VSI') is ezslide.VsiFile      # case-insensitive
+    assert wsi_class('a.ets') is ezslide.VsiFile
 
 
-def test_open_slide_is_a_context_manager():
+def test_open_wsi_is_a_context_manager():
     rgb, _, _, _ = _fixtures()
-    with open_slide(rgb) as slide:
+    with open_wsi(rgb) as slide:
         assert slide[0].level_shapes[0] == (2048, 2048)
 
 
@@ -74,8 +74,8 @@ def test_multiscale_is_always_a_list():
     rgb, label, _, _ = _fixtures()
     # A flat file with no pyramid asked for still comes back as a list of one,
     # which is the whole point: callers never branch on level count.
-    assert isinstance(open_slide(label)[0].multiscale(), list)
-    assert len(open_slide(label)[0].multiscale()) == 1
+    assert isinstance(open_wsi(label)[0].multiscale(), list)
+    assert len(open_wsi(label)[0].multiscale()) == 1
     assert len(_pyramidal(rgb)[0].multiscale()) > 1
 
 
@@ -96,7 +96,7 @@ def test_multiscale_eagerfies():
 
 def test_multiscale_eager_false_stays_lazy():
     rgb, _, _, _ = _fixtures()
-    level = open_slide(rgb)[0].multiscale(eager=False)[0]
+    level = open_wsi(rgb)[0].multiscale(eager=False)[0]
     assert not isinstance(level[0:32, 0:32], np.ndarray)
 
 
@@ -114,7 +114,7 @@ def test_level_shapes_and_downsamples():
 
 def test_pixel_size_absent_is_none():
     _, label, _, _ = _fixtures()
-    assert open_slide(label)[0].pixel_size is None
+    assert open_wsi(label)[0].pixel_size is None
 
 
 def test_pixel_size_read_from_ome():
@@ -123,7 +123,7 @@ def test_pixel_size_read_from_ome():
     tifffile.imwrite(path, np.zeros((512, 512), np.uint8), ome=True,
                      resolution=(1 / 0.325, 1 / 0.325),
                      resolutionunit='MICROMETER')
-    size = open_slide(path)[0].pixel_size
+    size = open_wsi(path)[0].pixel_size
     assert size is not None
     assert abs(size[0] - 0.325) < 1e-6 and abs(size[1] - 0.325) < 1e-6
 
@@ -134,7 +134,7 @@ def test_pixel_size_read_from_ome():
 
 def test_thumbnail_rgb_is_composited():
     rgb, _, _, src = _fixtures()
-    thumb = open_slide(rgb)[0].thumbnail
+    thumb = open_wsi(rgb)[0].thumbnail
     assert thumb is not None
     assert thumb.mode == 'RGB'
     assert np.array_equal(np.asarray(thumb), src['rgb'])
@@ -142,7 +142,7 @@ def test_thumbnail_rgb_is_composited():
 
 def test_thumbnail_mono_is_grayscale():
     _, label, _, src = _fixtures()
-    thumb = open_slide(label)[0].thumbnail
+    thumb = open_wsi(label)[0].thumbnail
     assert thumb is not None
     assert np.array_equal(np.asarray(thumb), src['label'])
 
@@ -156,7 +156,7 @@ def test_thumbnail_multiplex_is_not_none():
     # shape/mode/dtype and that it's monotonic with the source rather than
     # exact pixel equality.
     _, _, cycif, src = _fixtures()
-    thumb = open_slide(cycif)[0].thumbnail
+    thumb = open_wsi(cycif)[0].thumbnail
     assert thumb is not None
     assert thumb.mode == 'L'
     arr = np.asarray(thumb)
@@ -185,12 +185,12 @@ def test_get_thumbnail_on_multiplex_reader_does_not_crash():
 
 def test_channel_names_from_ome():
     _, _, cycif, _ = _fixtures()
-    assert open_slide(cycif)[0].channel_names == CHANNELS
+    assert open_wsi(cycif)[0].channel_names == CHANNELS
 
 
 def test_channel_names_absent_is_none():
     _, label, _, _ = _fixtures()
-    assert open_slide(label)[0].channel_names is None
+    assert open_wsi(label)[0].channel_names is None
 
 
 def test_channel_axis_resolution():
@@ -205,7 +205,7 @@ def test_channel_axis_resolution():
 
 def test_n_channels():
     _, _, cycif, _ = _fixtures()
-    level = open_slide(cycif)[0].multiscale()[0]
+    level = open_wsi(cycif)[0].multiscale()[0]
     assert n_channels(level, 'CYX') == 4
     assert n_channels(np.zeros((8, 9)), 'YX') == 1
 
@@ -227,7 +227,7 @@ def test_channel_view_is_pixel_exact_on_every_level_kind():
 
 def test_channel_view_indexing_matches_numpy():
     _, _, cycif, src = _fixtures()
-    level = open_slide(cycif)[0].multiscale()[0]
+    level = open_wsi(cycif)[0].multiscale()[0]
     view, want = ChannelView(level, 'CYX', 1), src['cycif'][1]
     for key in [(slice(0, 32), slice(0, 32)), Ellipsis, 5,
                 (slice(None), 7), (3, slice(10, 20))]:
@@ -243,7 +243,7 @@ def test_channel_view_passthrough_without_a_channel_axis():
 
 def test_channel_view_rejects_a_channel_that_is_not_there():
     _, _, cycif, _ = _fixtures()
-    level = open_slide(cycif)[0].multiscale()[0]
+    level = open_wsi(cycif)[0].multiscale()[0]
     for data, axes, ch in [(level, 'CYX', 9), (np.zeros((8, 9)), 'YX', 1)]:
         try:
             ChannelView(data, axes, ch)
@@ -254,7 +254,7 @@ def test_channel_view_rejects_a_channel_that_is_not_there():
 
 def test_channel_view_array_protocol():
     _, _, cycif, src = _fixtures()
-    level = open_slide(cycif)[0].multiscale()[0]
+    level = open_wsi(cycif)[0].multiscale()[0]
     view = ChannelView(level, 'CYX', 0)
     assert np.array_equal(np.asarray(view), src['cycif'][0])
     assert np.array(view, copy=False).shape == (1024, 1024)     # NumPy 2
@@ -281,7 +281,7 @@ def test_interleaved_view_is_pixel_exact_on_every_level_kind():
 
 def test_interleaved_view_indexing_matches_numpy():
     _, _, cycif, src = _fixtures()
-    level = open_slide(cycif)[0].multiscale()[0]
+    level = open_wsi(cycif)[0].multiscale()[0]
     view, want = InterleavedView(level, 'CYX'), np.moveaxis(src['cycif'], 0, -1)
     for key in [(slice(0, 32), slice(0, 32)), Ellipsis, 5,
                 (slice(None), 7), (3, slice(10, 20)),
@@ -308,7 +308,7 @@ def test_interleaved_view_rejects_a_level_without_channels():
 
 def test_interleaved_view_array_protocol():
     _, _, cycif, src = _fixtures()
-    level = open_slide(cycif)[0].multiscale()[0]
+    level = open_wsi(cycif)[0].multiscale()[0]
     view = InterleavedView(level, 'CYX')
     assert np.array_equal(np.asarray(view), np.moveaxis(src['cycif'], 0, -1))
     assert np.array(view, copy=False).shape == (1024, 1024, 4)   # NumPy 2
@@ -324,7 +324,7 @@ def test_channel_groups_single_series():
     that a group is always a list even when there is nothing to group.
     """
     _, _, cycif, _ = _fixtures()
-    slide = open_slide(cycif)
+    slide = open_wsi(cycif)
     groups = channel_groups(slide)
     assert groups == [[slide[0]]]
     assert channel_groups(list(slide.series)) == groups     # accepts a sequence

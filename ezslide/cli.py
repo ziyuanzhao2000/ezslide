@@ -31,7 +31,7 @@ import numpy as np
 
 from .array.channel import ChannelView
 from .array.rechunk import DEFAULT_MAX_MEM
-from .formats.open import open_slide
+from .formats.open import open_wsi
 from .formats.tiff import infer_axes
 from .writers.ome_tiff import write_ome_tiff
 
@@ -119,7 +119,7 @@ def _collect(paths, args):
         path, page = _split_spec(path_spec)
         if not Path(path).exists():
             _die(f"input not found: {path}")
-        slide = open_slide(path)
+        slide = open_wsi(path)
         opened.append(slide)
         chosen = _pick_series(slide, page, args.scene)
         series.append((Path(path).stem, chosen))
