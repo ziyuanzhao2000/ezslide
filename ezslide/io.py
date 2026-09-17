@@ -221,13 +221,14 @@ def open_slides(
     tile *reads* that are expensive, and those stay bounded by the selected
     subset.
     """
+    from tqdm import tqdm
     return {
         slide_id: wsi
-        for slide_id, wsi in iter_slides(
+        for slide_id, wsi in tqdm(iter_slides(
             slides_table,
             store_col=store_col,
             slide_id_col=slide_id_col,
             attach_images=attach_images,
             close=False,
-        )
+        ))
     }

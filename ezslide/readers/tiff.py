@@ -11,7 +11,8 @@ class TiffFileZarrReader(ZarrSlideReader):
     """SVS, NDPI, OME-TIFF and friends, as lazy tensorstore-backed levels."""
 
     name = "tifffile_zarr"
-    extensions = (".ndpi", ".tif", ".tiff", ".svs", ".scn", ".bif", ".qptiff")
+    extensions = extensions = (".ndpi", ".tif", ".tiff", ".svs", ".scn", ".bif", ".qptiff",
+              ".ome.tif", ".ome.tiff")
     file_cls = TiffFile
 
 
