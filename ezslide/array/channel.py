@@ -21,7 +21,9 @@ from __future__ import annotations
 
 import numpy as np
 
-__all__ = ['ChannelView', 'InterleavedView', 'channel_axis_of', 'n_channels']
+__all__ = ['ChannelView', 'InterleavedView', 'channel_axis_of', 'n_channels',
+           'n_planar_channels', 'level_region_index', 'to_channel_last',
+           'slice_level_region']
 
 
 def channel_axis_of(axes, prefer=None):
@@ -30,12 +32,17 @@ def channel_axis_of(axes, prefer=None):
     ``C`` if the file records one, else the interleaved sample axis ``S`` — an
     RGB image is one OME channel of three samples, but split apart it is three
     planes. Failing both, the first unknown axis: ``infer_axes`` labels axes it
-    had to guess ``?`` and never emits a ``C``, so a multi-channel file that
-    records no axes string would otherwise look like a single plane.
+    had to guess ``?`` and never emits a ``C``, and ``tifffile`` labels an
+    axis ``Q`` when its own "shaped" metadata (the ``tifffile.imwrite``
+    default) records a shape but no axes — so a multi-channel file with no
+    recorded axes string would otherwise look like a single plane.
+
+    ``I`` (tifffile's label for a plain multi-page TIFF with no metadata) is
+    not treated as a channel axis.
     """
     if prefer is not None:
         return prefer
-    for label in ('C', 'S', '?'):
+    for label in ('C', 'S', 'Q', '?'):
         if label in axes:
             return axes.index(label)
     return None
@@ -45,6 +52,47 @@ def n_channels(data, axes, channel_axis=None):
     """How many channels ``data`` holds under ``axes``."""
     axis = channel_axis_of(axes, channel_axis)
     return 1 if axis is None else int(data.shape[axis])
+
+
+def n_planar_channels(data, axes):
+    """Channels stored on a planar axis (``C``/``Q``/``?``) of ``data``.
+
+    1 when the channel axis is the interleaved sample axis ``S`` (an RGB
+    image is one channel of three samples) or there is no channel axis.
+    """
+    axis = channel_axis_of(axes)
+    if axis is None or axes[axis] == 'S':
+        return 1
+    return int(data.shape[axis])
+
+
+def level_region_index(lv, y0, height, x0, width):
+    """Index tuple for a ``(y0:y0+height, x0:x0+width)`` region of ``lv``.
+
+    Built from ``lv.y_ax``/``lv.x_ax`` rather than assuming axis 0 is Y and
+    axis 1 is X -- true for channel-last "YXS"/"YXC" files, but wrong for a
+    channel-first "SYX"/"CYX" file, where a positional slice lands on the
+    channel axis instead of Y and leaves X unsliced.
+    """
+    idx = [slice(None)] * len(lv.shape)
+    idx[lv.y_ax] = slice(y0, y0 + height)
+    idx[lv.x_ax] = slice(x0, x0 + width)
+    return tuple(idx)
+
+
+def to_channel_last(lv, arr):
+    """Move ``arr``'s channel axis (per ``lv.axes``) to the end, if needed."""
+    c_ax = channel_axis_of(lv.axes)
+    if c_ax is not None and c_ax != len(lv.axes) - 1:
+        arr = np.moveaxis(arr, c_ax, -1)
+    return arr
+
+
+def slice_level_region(lv, y0, height, x0, width):
+    """Read a ``(height, width)`` region out of a pyramid level, channel-last."""
+    arr = lv[level_region_index(lv, y0, height, x0, width)]
+    arr = arr.compute() if hasattr(arr, "compute") else np.asarray(arr)
+    return to_channel_last(lv, arr)
 
 
 class ChannelView:

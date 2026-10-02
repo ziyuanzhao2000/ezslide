@@ -29,7 +29,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .array.channel import ChannelView
+from .array.channel import ChannelView, n_planar_channels
 from .array.rechunk import DEFAULT_MAX_MEM
 from .formats.open import open_wsi
 from .formats.tiff import infer_axes
@@ -89,6 +89,21 @@ class _AsChannel:
         self.name = getattr(series, 'name', None)
 
 
+class _WithChannelNames:
+    """A passthrough series with its internal channels explicitly named.
+
+    ``--channel-names`` given for a single input whose channel axis (``C``,
+    or the unknown ``Q``/``?``) already holds more than one channel: label
+    those channels directly rather than requiring one file per channel.
+    """
+
+    def __init__(self, series, names):
+        self.levels = series.levels
+        self.name = getattr(series, 'name', None)
+        self.channel_group_key = None
+        self.channel_names = list(names)
+
+
 # --------------------------------------------------------------------------
 # input handling
 # --------------------------------------------------------------------------
@@ -139,14 +154,25 @@ def _collect(paths, args):
     _check_compatible(planes)
 
     names = args.channel_names
+
+    if len(planes) == 1 and planes[0][2] is None:
+        stem, ser = planes[0][0], planes[0][1]
+        internal_n = _planar_channels(ser)
+        if names and internal_n > 1:
+            # The one input already holds several channels (C/Q axis): name
+            # them directly instead of requiring one file per channel.
+            if len(names) != internal_n:
+                _die(f"--channel-names has {len(names)} entries but {stem} "
+                     f"has {internal_n} channel(s)")
+            return [_WithChannelNames(ser, names)], opened
+        # No explicit names: leave it exactly as the reader saw it, so an RGB
+        # brightfield stays one channel of three samples.
+        if not names:
+            return [ser], opened
+
     if names and len(names) != len(planes):
         _die(f"--channel-names has {len(names)} entries but the output will "
              f"have {len(planes)} channels")
-
-    # One input, no explicit names: leave it exactly as the reader saw it, so
-    # an RGB brightfield stays one channel of three samples.
-    if len(planes) == 1 and not names and planes[0][2] is None:
-        return [planes[0][1]], opened
 
     key = ('ezslide-cli', id(planes))
     out = []
@@ -176,6 +202,19 @@ def _check_compatible(planes):
 def _die(message):
     print(f"\nERROR: {message}", file=sys.stderr)
     raise SystemExit(1)
+
+
+def _planar_channels(series):
+    """Channels on ``series``' planar channel axis; 1 for interleaved RGB."""
+    base = series.levels[0]
+    axes = infer_axes(base.data, getattr(base, 'axes', None))
+    return n_planar_channels(base.data, axes)
+
+
+def _total_channels(series):
+    """Channels the output will actually have, for the summary line."""
+    return sum(len(getattr(s, 'channel_names', None) or ())
+               or _planar_channels(s) for s in series)
 
 
 # --------------------------------------------------------------------------
@@ -220,7 +259,8 @@ def convert_command(args):
 
     tile = (args.tile_size, args.tile_size)
     print(f"Writing {out}")
-    print(f"    inputs      : {len(args.inputs)} -> {len(series)} channel(s)")
+    print(f"    inputs      : {len(args.inputs)} -> "
+          f"{_total_channels(series)} channel(s)")
     print(f"    tile        : {tile[0]}x{tile[1]}  compression={args.compression}")
     print(f"    pyramid     : {'generate' if args.pyramid else 'as-is'}"
           f"  downsample={how}{' (mask)' if args.mask else ''}")

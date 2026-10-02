@@ -1,14 +1,11 @@
 """ezslide's channel-generic replacement for wsidata's ``to_datatree``.
 
-``wsidata.reader._reader_datatree_zarr_v3.to_datatree`` (the code path wsidata
-selects whenever ``zarr>=3`` is installed) hardcodes a 3-channel ``uint8`` RGB
-image everywhere: ``SlideZarrStore.channels = 3``, a fixed ``"<u1"`` dtype in
-its zarr-v3 array metadata, and ``c_coords=["r", "g", "b"]`` in
-``to_datatree()`` itself. That is exactly right for an H&E/brightfield scan
-and silently wrong for anything else — a multiplexed immunofluorescence image
+``wsidata.reader.to_datatree`` (``wsidata/reader/_datatree.py``) hardcodes a
+3-channel ``uint8`` RGB image: ``dtype=np.uint8``, a ``(3, H, W)`` chunk grid
+and ``c_coords=["r", "g", "b"]``. That is right for an H&E/brightfield scan
+and wrong for anything else — a multiplexed immunofluorescence image
 (``CYX``, an arbitrary channel count, often ``uint16``) or a mono image
-(``YX``, no channel axis at all) gets reshaped over the wrong strides, which
-is silent data corruption rather than a crash.
+(``YX``, no channel axis at all).
 
 This module resolves channel count, dtype and channel names per reader
 instead of assuming them, mirroring the ``HnE``/``mIF``/``mono`` branching in
@@ -16,28 +13,26 @@ instead of assuming them, mirroring the ``HnE``/``mIF``/``mono`` branching in
 requiring an explicit ``type`` argument, since ``wsidata.open_wsi()`` has no
 way to forward one through to ``to_datatree``.
 
-``patch_to_datatree()`` installs this in place of wsidata's version. The
-``zarr<3`` code path (``_reader_datatree_zarr_v2.py``) is not patched: this
-project's ``pyproject.toml`` pins ``zarr>=3.0``, so that path is unreachable
-in any environment satisfying ezslide's own dependency floor.
+The layout otherwise mirrors wsidata 0.12: one ``da.map_blocks`` per level
+with the reader in the task arguments (so the graph pickles), nodes
+``scale{i}/image`` with dims ``c, y, x``, the same transforms, and
+``attrs = asdict(reader.properties)``.
+
+``patch_to_datatree()`` installs this in place of wsidata's version.
 """
 
 from __future__ import annotations
 
-import asyncio
-import math
 from dataclasses import asdict
+from math import ceil
 
 import dask.array as da
 import numpy as np
 import xarray as xr
-from dask import delayed
 from spatialdata.models import Image2DModel
 from spatialdata.transformations import Identity, Scale
-from wsidata.reader._reader_datatree_zarr_v3 import SlideZarrStore
-from zarr.core.buffer import default_buffer_prototype
 
-from ..array.channel import channel_axis_of, n_channels
+from ..array.channel import n_channels
 
 __all__ = ["to_datatree", "patch_to_datatree"]
 
@@ -92,105 +87,29 @@ def _channel_coords(n_channels, channel_names, dtype):
     return [f"c{i}" for i in range(n_channels)]
 
 
-class EzslideZarrStore(SlideZarrStore):
-    """``SlideZarrStore`` with channel count and dtype resolved per reader.
+def _read_block(reader, level, block_info=None):
+    """One ``(C, h, w)`` block of ``level``, at the block's array location.
 
-    Everything else — key parsing, zarr-v3 listing, ``.zgroup``, byte-range
-    handling — is inherited unchanged from wsidata's implementation; only the
-    two spots that assumed 3 channels of ``uint8`` are overridden.
+    ezslide readers read in level-local pixels, so the block is exact. Other
+    readers take level-0 offsets and map them with ``int(x / ds)``; ``ceil``
+    lands on the block origin, as in wsidata's ``_read_block``.
     """
-
-    def __init__(self, reader, *, chunks=(1024, 1024)):
-        super().__init__(reader, chunks=chunks)
-        channels, dtype, channel_names = _probe_shape(reader)
-        self.channels = channels
-        self.dtype = dtype
-        self.channel_names = channel_names
-
-    def _array_meta(self, level):
-        meta = super()._array_meta(level)
-        meta["dtype"] = self.dtype.str
-        return meta
-
-    async def get(self, key, prototype, byte_range=None):
-        """Override chunk reads to fetch level-local pixels directly.
-        """
-        parsed = self._parse_chunk_key(key)
-        if parsed is None:
-            return await super().get(key, prototype, byte_range)
-
-        await self._ensure_open()
-        level, row, col = parsed
-        if level < 0 or level >= len(self._level_shape):
-            return None
-        h, w = self._level_shape[level]
-        ch_h, ch_w = self.chunks
-        chunk_w = min(ch_w, w - col * ch_w)
-        chunk_h = min(ch_h, h - row * ch_h)
-        if chunk_w <= 0 or chunk_h <= 0:
-            return None
-
-        arr = await asyncio.to_thread(
-            self._reader._get_level_region,
-            level,
-            row * ch_h,
-            col * ch_w,
-            chunk_h,
-            chunk_w,
+    _, (y0, y1), (x0, x1) = block_info[None]["array-location"]
+    if hasattr(reader, "_get_level_region"):
+        region = reader._get_level_region(level, y0, x0, y1 - y0, x1 - x0)
+    else:
+        ds = reader.properties.level_downsample[level]
+        region = reader.get_region(
+            ceil(x0 * ds), ceil(y0 * ds), x1 - x0, y1 - y0, level=level
         )
-        if arr.ndim == 2:
-            arr = arr[:, :, None]
-        arr = np.ascontiguousarray(arr)
-        return arr.tobytes()
-
-
-async def _fetch_chunk_as_array(store, level, row, col):
-    """Adapted from ``wsidata.reader._reader_datatree_zarr_v3._fetch_chunk_as_array``,
-    generalized from a hardcoded ``uint8``/3-channel buffer to ``store.dtype``/``store.channels``.
-    """
-    proto = default_buffer_prototype()
-    key = f"{level}/{row}.{col}"
-    buf = await store.get(key, proto)
-    h, w = store._level_shape[level]
-    ch_h, ch_w = store.chunks
-    chunk_w = min(ch_w, w - col * ch_w)
-    chunk_h = min(ch_h, h - row * ch_h)
-    channels, dtype = store.channels, store.dtype
-    if buf is None:
-        return np.zeros((chunk_h, chunk_w, channels), dtype=dtype)
-    arr = np.frombuffer(bytes(buf), dtype=dtype)
-    return arr.reshape((chunk_h, chunk_w, channels))
-
-
-def level_to_xarray(store, level):
-    """Adapted from ``wsidata.reader._reader_datatree_zarr_v3.level_to_xarray``,
-    generalized the same way as :func:`_fetch_chunk_as_array`.
-    """
-    h, w = store._level_shape[level]
-    ch_h, ch_w = store.chunks
-    channels, dtype = store.channels, store.dtype
-
-    rows, cols = math.ceil(h / ch_h), math.ceil(w / ch_w)
-    blocks = []
-    for r in range(rows):
-        row_blocks = [
-            da.from_delayed(
-                delayed(
-                    lambda s, L, R, C: asyncio.run(_fetch_chunk_as_array(s, L, R, C))
-                )(store, level, r, c),
-                shape=(min(ch_h, h - r * ch_h), min(ch_w, w - c * ch_w), channels),
-                dtype=dtype,
-            )
-            for c in range(cols)
-        ]
-        blocks.append(da.concatenate(row_blocks, axis=1))
-    arr = da.concatenate(blocks, axis=0)
-    coords = {"y": np.arange(h), "x": np.arange(w), "c": np.arange(channels)}
-    return xr.DataArray(arr, dims=("y", "x", "c"), coords=coords)
+    region = np.asarray(region)
+    if region.ndim == 2:
+        region = region[:, :, None]
+    return region.transpose(2, 0, 1)
 
 
 def to_datatree(reader, chunks=(1024, 1024)):
-    """Drop-in, channel-generic replacement for wsidata's zarr-v3 ``to_datatree``.
+    """Drop-in, channel-generic replacement for wsidata's ``to_datatree``.
 
     Builds the same multiscale ``DataTree`` of ``Image2DModel``-wrapped
     levels, but with channel count, dtype and ``c_coords`` resolved from the
@@ -199,26 +118,37 @@ def to_datatree(reader, chunks=(1024, 1024)):
     (``YX``) load through the same ``wsidata.open_wsi(..., attach_images=True)``
     path as a standard RGB slide.
     """
-    store = EzslideZarrStore(reader, chunks=chunks)
-    c_coords = _channel_coords(store.channels, store.channel_names, store.dtype)
+    channels, dtype, channel_names = _probe_shape(reader)
+    c_coords = _channel_coords(channels, channel_names, dtype)
 
-    images = {}
-    for level in range(reader.properties.n_level):
-        img = level_to_xarray(store, level)
-        scale_factor = reader.properties.level_downsample[level]
-        transform = (
-            Identity()
-            if scale_factor == 1
-            else Scale([scale_factor, scale_factor], axes=("y", "x"))
+    levels = {}
+    for level, (height, width) in enumerate(reader.properties.level_shape):
+        data = da.map_blocks(
+            _read_block,
+            reader,
+            level,
+            chunks=da.core.normalize_chunks(
+                (channels, *chunks), (channels, height, width)
+            ),
+            dtype=dtype,
+            meta=np.empty((0, 0, 0), dtype=dtype),
         )
-        scale_image = Image2DModel.parse(
-            img, transformations={"global": transform}, c_coords=c_coords
+        ds = reader.properties.level_downsample[level]
+        transform = Identity() if ds == 1 else Scale([ds, ds], axes=("y", "x"))
+        image = Image2DModel.parse(
+            xr.DataArray(
+                data,
+                dims=("c", "y", "x"),
+                coords={"y": np.arange(height), "x": np.arange(width)},
+            ),
+            c_coords=c_coords,
+            transformations={"global": transform},
         )
-        images[f"scale{level}"] = xr.Dataset({"image": scale_image})
+        levels[f"scale{level}"] = xr.Dataset({"image": image})
 
-    slide_image = xr.DataTree.from_dict(images)
-    slide_image.attrs = asdict(reader.properties)
-    return slide_image
+    tree = xr.DataTree.from_dict(levels)
+    tree.attrs = asdict(reader.properties)
+    return tree
 
 
 def patch_to_datatree():

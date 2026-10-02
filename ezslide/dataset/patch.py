@@ -29,11 +29,11 @@ from __future__ import annotations
 from collections import OrderedDict
 from functools import cached_property
 
-import cv2
 import numpy as np
 from torch.utils.data import Dataset
 from wsidata import shapes2tiles
 
+from ..array.channel import level_region_index, to_channel_last
 from ..array.tensorstore_array import tensorstore_context
 from ..readers.base import ZarrSlideReader
 
@@ -48,10 +48,16 @@ def _color_norm_fn(color_norm):
 
 
 def _level_chunks(reader, level):
-    """Chunk shape of a pyramid level, or None if unavailable."""
+    """(chunk_h, chunk_w) of a pyramid level, or None if unavailable.
+
+    Indexed by ``lv.y_ax``/``lv.x_ax`` rather than positions 0/1 -- a
+    channel-first "SYX"/"CYX" level's chunk tuple has the channel axis'
+    chunk size (usually 1) first, not the row chunk size.
+    """
     try:
         lv = reader.series.levels[level]
-        return getattr(lv, "data", lv).chunks
+        chunks = getattr(lv, "data", lv).chunks
+        return chunks[lv.y_ax], chunks[lv.x_ax]
     except Exception:
         return None
 
@@ -154,12 +160,15 @@ class PatchDataset(Dataset):
         ds = self.reader.properties.level_downsample[level]
         y0 = int(tile_req.y / ds)
         x0 = int(tile_req.x / ds)
-        arr = self.reader.series.levels[level]
-        return arr[y0:y0 + tile_req.height, x0:x0 + tile_req.width]
+        lv = self.reader.series.levels[level]
+        return lv[level_region_index(lv, y0, tile_req.height, x0, tile_req.width)]
 
     def _read_one(self, tile_req):
         if self._tensorstore_backed:
-            return self._level_view(tile_req)._ts.read().result()
+            level = self.reader.translate_level(tile_req.level)
+            lv = self.reader.series.levels[level]
+            arr = self._level_view(tile_req)._ts.read().result()
+            return to_channel_last(lv, arr)
         return self.reader.get_region(tile_req.x, tile_req.y, tile_req.width,
                                        tile_req.height, level=tile_req.level)
 
@@ -167,16 +176,17 @@ class PatchDataset(Dataset):
         """Batched read for __getitems__: issue every future before waiting
         on any of them when tensorstore-backed; serial reads otherwise."""
         if self._tensorstore_backed and self.async_batch:
+            levels = [self.reader.translate_level(tr.level) for tr in tile_reqs]
+            lvs = [self.reader.series.levels[lv] for lv in levels]
             futures = [self._level_view(tr)._ts.read() for tr in tile_reqs]
-            return [f.result() for f in futures]
+            return [to_channel_last(lv, f.result()) for lv, f in zip(lvs, futures)]
         return [self._read_one(tr) for tr in tile_reqs]
 
     # -- postprocessing (matches TileImagesDataset.__getitem__) --------------
 
     def _postprocess(self, idx, tile):
         tile_req = self._tile_requests[idx]
-        if tile_req.dsize is not None:
-            tile = cv2.resize(tile, tile_req.dsize)
+        tile = tile_req.resize(tile)
         tile = self._cn_func(tile)
 
         out_w = tile.shape[1]
@@ -273,8 +283,9 @@ class PatchBlockDataset(PatchDataset):
         level = self.reader.translate_level(self._patch_level)
         if self._tensorstore_backed:
             tensorstore_context(num_workers=self._num_workers)
-            view = self.reader.series.levels[level][y0:y1, x0:x1]
-            return view._ts.read().result()
+            lv = self.reader.series.levels[level]
+            view = lv[level_region_index(lv, y0, y1 - y0, x0, x1 - x0)]
+            return to_channel_last(lv, view._ts.read().result())
         ds = self.reader.properties.level_downsample[level]
         return self.reader.get_region(int(x0 * ds), int(y0 * ds),
                                        x1 - x0, y1 - y0, level=self._patch_level)
@@ -303,12 +314,13 @@ class PatchBlockDataset(PatchDataset):
             if self._tensorstore_backed and self.async_batch:
                 tensorstore_context(num_workers=self._num_workers)
                 level = self.reader.translate_level(self._patch_level)
+                lv = self.reader.series.levels[level]
                 futures = {}
                 for block_id in pending:
                     _, y0, y1, x0, x1 = self._blocks[block_id]
-                    futures[block_id] = self.reader.series.levels[level][y0:y1, x0:x1]._ts.read()
+                    futures[block_id] = lv[level_region_index(lv, y0, y1 - y0, x0, x1 - x0)]._ts.read()
                 for block_id, future in futures.items():
-                    blocks[block_id] = future.result()
+                    blocks[block_id] = to_channel_last(lv, future.result())
             else:
                 for block_id in pending:
                     blocks[block_id] = self._read_block_uncached(block_id)

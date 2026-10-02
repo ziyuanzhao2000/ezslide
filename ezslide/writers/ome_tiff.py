@@ -67,6 +67,7 @@ from pathlib import Path
 import numpy as np
 import tifffile
 
+from ..array.channel import channel_axis_of
 from ..array.rechunk import DEFAULT_MAX_MEM, iter_rechunked, plan_rechunk
 from ..array.reduce import block_reduce
 from ..formats.open import channel_groups, open_wsi
@@ -234,9 +235,18 @@ def _group_channel_names(group):
     if len(group) > 1:
         return [str(getattr(s, 'channel', None) or s.name) for s in group]
     names = getattr(group[0], 'channel_names', None)
-    samples = _samples(group[0].levels[0])
-    if names and len(names) == 1 and samples == 1:
+    if not names:
+        return None
+    base = group[0].levels[0]
+    axes = infer_axes(base.data, getattr(base, 'axes', None))
+    samples = _samples(base)
+    if len(names) == 1 and samples == 1:
         return [str(names[0])]
+    c_ax = channel_axis_of(axes)
+    if (c_ax is not None and axes[c_ax] != 'S'
+            and len(names) == base.data.shape[c_ax]):
+        # A genuinely multi-channel series (C/Q/? axis): one name per channel.
+        return [str(n) for n in names]
     # An RGB image is one OME channel with three samples, not three channels;
     # naming it per-sample would misdescribe the file.
     return None
@@ -563,6 +573,14 @@ def _out_shape(level, nmembers):
         # Merged channels: each member contributes one YX plane.
         y, x = shape[axes.index('Y')], shape[axes.index('X')]
         return (nmembers, y, x), 'CYX'
+    # A single series can carry its channel axis under an unrecognized code
+    # (tifffile's 'Q', or ezslide's own '?' guess) rather than 'C'. tifffile's
+    # OME writer doesn't know those codes mean "channel" either, so left as-is
+    # it maps the axis onto SizeT instead of SizeC. 'S' is left alone: OME
+    # already understands SamplesPerPixel natively.
+    c_ax = channel_axis_of(axes)
+    if c_ax is not None and axes[c_ax] not in ('C', 'S'):
+        axes = axes[:c_ax] + 'C' + axes[c_ax + 1:]
     return shape, axes
 
 

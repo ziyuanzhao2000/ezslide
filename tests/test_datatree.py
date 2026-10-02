@@ -165,6 +165,105 @@ def test_open_wsi_attaches_rgb_image_unchanged():
 
 
 # --------------------------------------------------------------------------
+# to_datatree: exact level pixels, pickling, non-ezslide readers
+# --------------------------------------------------------------------------
+
+def _pyramid_fixtures():
+    """(rgb_path, cycif_path, mono_path) with 3-level pyramids, odd sizes."""
+    d = tempfile.mkdtemp(prefix='ezslide-test-')
+    specs = [
+        ('rgb.ome.tif', np.random.randint(0, 255, (1500, 1300, 3), dtype=np.uint8), 'YXS'),
+        ('cycif.ome.tif', np.random.randint(0, 4095, (4, 1500, 1300), dtype=np.uint16), 'CYX'),
+        ('mono.ome.tif', np.random.randint(0, 255, (1500, 1300), dtype=np.uint8), 'YX'),
+    ]
+    paths = []
+    for name, data, axes in specs:
+        path = os.path.join(d, name)
+        y_ax = axes.index('Y')
+        with tifffile.TiffWriter(path) as tif:
+            opts = dict(tile=(256, 256), metadata={'axes': axes},
+                        photometric='rgb' if axes == 'YXS' else 'minisblack')
+            tif.write(data, subifds=2, **opts)
+            level = data
+            for _ in range(2):
+                idx = [slice(None)] * data.ndim
+                idx[y_ax] = slice(None, None, 2)
+                idx[y_ax + 1] = slice(None, None, 2)
+                level = level[tuple(idx)]
+                tif.write(level, subfiletype=1, **opts)
+        paths.append(path)
+    return paths
+
+
+def _native_level(reader, level):
+    h, w = reader.properties.level_shape[level]
+    arr = np.asarray(reader._get_level_region(level, 0, 0, h, w))
+    return arr[:, :, None] if arr.ndim == 2 else arr
+
+
+def test_to_datatree_levels_match_native_reads():
+    for path in _pyramid_fixtures():
+        reader = READERS.try_open(path, reader='tifffile_zarr')
+        try:
+            assert reader.properties.n_level == 3
+            tree = to_datatree(reader, chunks=(512, 512))
+            for level in range(reader.properties.n_level):
+                img = tree[f'scale{level}']['image']
+                native = _native_level(reader, level)
+                assert img.dtype == native.dtype
+                np.testing.assert_array_equal(
+                    img.transpose('y', 'x', 'c').values, native)
+        finally:
+            reader.detach_reader()
+
+
+def test_to_datatree_pickles_and_still_reads():
+    import pickle
+
+    _, cycif, _ = _pyramid_fixtures()
+    reader = READERS.try_open(cycif, reader='tifffile_zarr')
+    try:
+        tree = to_datatree(reader, chunks=(512, 512))
+        expected = tree['scale1']['image'].values
+        restored = pickle.loads(pickle.dumps(tree))
+        np.testing.assert_array_equal(restored['scale1']['image'].values, expected)
+        assert list(restored['scale0']['image'].coords['c'].values) == \
+            list(tree['scale0']['image'].coords['c'].values)
+    finally:
+        reader.detach_reader()
+
+
+def test_to_datatree_non_ezslide_reader():
+    """A wsidata reader (no ``_get_level_region``) goes through ``get_region``.
+
+    Compared against wsidata's own ``to_datatree``, not one whole-level read:
+    OpenSlide resamples at fractional level-0 offsets, so per-block reads
+    differ slightly from a single read at non-integer downsamples.
+    """
+    from wsidata.reader._datatree import to_datatree as wsidata_to_datatree
+
+    svs = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                       'sample_images', 'example_he_wsi.svs')
+    reader_cls = READERS['openslide'] if 'openslide' in READERS else None
+    if reader_cls is None or not reader_cls.is_available() or not os.path.exists(svs):
+        print('  SKIP  openslide or sample SVS unavailable')
+        return
+    patch_to_datatree()
+    from wsidata import open_wsi
+
+    wsi = open_wsi(svs, reader='openslide', attach_images=True, store=None)
+    tree = wsi.images['wsi']
+    reference = wsidata_to_datatree(wsi.reader)
+    for level in range(wsi.reader.properties.n_level):
+        img = tree[f'scale{level}']['image']
+        ref = reference[f'scale{level}']['image']
+        assert list(img.coords['c'].values) == ['r', 'g', 'b']
+        assert img.dtype == np.uint8
+        assert img.data.chunks == ref.data.chunks
+        np.testing.assert_array_equal(img.values, ref.values)
+
+
+# --------------------------------------------------------------------------
 
 def _main():
     tests = [(n, f) for n, f in sorted(globals().items())

@@ -201,20 +201,10 @@ class ZarrSlideReader(ReaderBase):
         return self._get_level_region(level, int(y / ds), int(x / ds), height, width)
 
     def _get_level_region(self, level, y0, x0, height, width):
-        from ..array.channel import channel_axis_of
+        from ..array.channel import slice_level_region
 
         lv = self.series.levels[level]
-        idx = [slice(None)] * len(lv.shape)
-        idx[lv.y_ax] = slice(y0, y0 + height)
-        idx[lv.x_ax] = slice(x0, x0 + width)
-        arr = lv[tuple(idx)]                      # WriteableZarrArray.__getitem__
-        arr = arr.compute() if hasattr(arr, "compute") else np.asarray(arr)
-        # 'C' for a planar multiplex file, else 'S' for interleaved RGB, else
-        # None for a plane with no channel axis at all (mono/label images).
-        c_ax = channel_axis_of(lv.axes)
-        if c_ax is not None and c_ax != len(lv.axes) - 1:
-            arr = np.moveaxis(arr, c_ax, -1)
-        return arr
+        return slice_level_region(lv, y0, height, x0, width)
 
     def get_thumbnail(self, size, **kwargs):
         img = self.series.thumbnail

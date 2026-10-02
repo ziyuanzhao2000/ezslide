@@ -19,7 +19,7 @@ dependencies = [
     "pillow>=10.0",
     "tensorstore>=0.1.85",
     "tifffile>=2026.5.2", # loosened from 2026.7.31
-    "wsidata>=0.11.0",
+    "wsidata>=0.12,<0.13",
     "zarr>=3.0",
 ]
 
